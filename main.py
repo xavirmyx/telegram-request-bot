@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.utils.helpers import escape_markdown
+from telegram.helpers import escape_markdown  # Corrección de la importación
 from dotenv import load_dotenv
 
 # Cargar variables de entorno
@@ -53,8 +53,12 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != ADMIN_GROUP_ID:
         await context.bot.send_message(chat_id=chat_id, text="❌ ¡Ups! Este comando solo funciona en el grupo de administradores. 😊")
         return False
-    admins = await context.bot.get_chat_administrators(chat_id)
-    return any(admin.user.id == user.id for admin in admins)
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        return any(admin.user.id == user.id for admin in admins)
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error al verificar administradores: {str(e)}")
+        return False
 
 # Mensaje de bienvenida al iniciar el bot
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
