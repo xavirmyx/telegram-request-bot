@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.utils.helpers import escape_markdown
 from dotenv import load_dotenv
 
 # Cargar variables de entorno
@@ -115,7 +116,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 minutes_left = int((time_left.total_seconds() % 3600) // 60)
 
                 await update.message.reply_text(
-                    f"⛔ ¡Lo siento, @{username}! Has agotado tus {REQUEST_LIMIT} solicitudes diarias. 😔\n"
+                    f"⛔ ¡Lo siento, @{escape_markdown(username)}! Has agotado tus {REQUEST_LIMIT} solicitudes diarias. 😔\n"
                     f"⏳ Podrás hacer más en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')}).\n"
                     f"¡Paciencia! 🌟"
                 )
@@ -123,7 +124,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if request_count > REQUEST_LIMIT:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=f"/warn @{username} Abuso de peticiones diarias."
+                        text=f"/warn @{escape_markdown(username)} Abuso de peticiones diarias."
                     )
             return
         else:
@@ -152,10 +153,10 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Confirmación con solicitudes restantes si aplica
     response_text = (
         f"✅ **¡Solicitud Registrada!** 🎉\n"
-        f"👤 @{username}\n"
+        f"👤 @{escape_markdown(username)}\n"
         f"🎟️ **Ticket #{ticket}**\n"
-        f"📝 Mensaje: {message}\n"
-        f"🏠 Grupo: {group_name}\n"
+        f"📝 Mensaje: {escape_markdown(message)}\n"
+        f"🏠 Grupo: {escape_markdown(group_name)}\n"
         f"🌐 Fuente: EntresHijos\n"
         f"🕒 Fecha: {request['date']}\n"
         f"¡Gracias por tu paciencia! 🙌"
@@ -166,6 +167,23 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=chat_id,
         text=response_text,
+        parse_mode="Markdown"
+    )
+
+    # Notificación de "Solicitud en cola"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📢 **Solicitud en Cola** ⏳\n"
+            f"👤 @{escape_markdown(username)}\n"
+            f"🎟️ **Ticket #{ticket}**\n"
+            f"📝 Mensaje: {escape_markdown(message)}\n"
+            f"🏠 Grupo: {escape_markdown(group_name)}\n"
+            f"🌐 Fuente: EntresHijos\n"
+            f"🕒 Fecha: {request['date']}\n"
+            f"📋 Estado: En espera de revisión por los administradores.\n"
+            f"¡Te avisaremos cuando haya actualizaciones! 🙌"
+        ),
         parse_mode="Markdown"
     )
 
@@ -238,9 +256,9 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"📋 **Solicitud - Ticket #{ticket}** {priority_mark}\n"
-                     f"👤 @{request['username']}\n"
-                     f"📝 Mensaje: {request['message']}\n"
-                     f"🏠 Grupo: {request['group_name']}\n"
+                     f"👤 @{escape_markdown(request['username'])}\n"
+                     f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                     f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                      f"🌐 Fuente: {request['source']}\n"
                      f"🕒 Fecha: {request['date']}\n\n"
                      f"Acciones disponibles: 👇",
@@ -414,8 +432,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         groups[req["group_name"]] = groups.get(req["group_name"], 0) + 1
         users[req["username"]] = users.get(req["username"], 0) + 1
 
-    group_stats = "\n".join([f"🏠 {group}: {count} solicitudes" for group, count in groups.items()])
-    top_users = "\n".join([f"👤 @{user}: {count} solicitudes" for user, count in sorted(users.items(), key=lambda x: x[1], reverse=True)[:3]])
+    group_stats = "\n".join([f"🏠 {escape_markdown(group)}: {count} solicitudes" for group, count in groups.items()])
+    top_users = "\n".join([f"👤 @{escape_markdown(user)}: {count} solicitudes" for user, count in sorted(users.items(), key=lambda x: x[1], reverse=True)[:3]])
 
     keyboard = [
         [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
@@ -465,9 +483,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             priority_mark = "🔥 **Prioridad**" if req["priority"] else ""
             message += (
                 f"🎟️ **Ticket #{req['ticket']}** {priority_mark}\n"
-                f"👤 @{req['username']}\n"
-                f"📝 Mensaje: {req['message']}\n"
-                f"🏠 Grupo: {req['group_name']}\n"
+                f"👤 @{escape_markdown(req['username'])}\n"
+                f"📝 Mensaje: {escape_markdown(req['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(req['group_name'])}\n"
                 f"🕒 Fecha: {req['date']}\n"
                 f"➖➖➖➖➖➖➖\n"
             )
@@ -541,9 +559,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
                 f"🗑️ **Eliminar Solicitud - Ticket #{ticket}** 🛠️\n"
-                f"👤 @{request['username']}\n"
-                f"📝 Mensaje: {request['message']}\n"
-                f"🏠 Grupo: {request['group_name']}\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                 f"🌐 Fuente: {request['source']}\n"
                 f"🕒 Fecha: {request['date']}\n\n"
                 f"¿Qué hacemos con esta solicitud? 👇",
@@ -562,9 +580,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
                 f"🔥 **Priorizar Solicitud - Ticket #{ticket}** ✨\n"
-                f"👤 @{request['username']}\n"
-                f"📝 Mensaje: {request['message']}\n"
-                f"🏠 Grupo: {request['group_name']}\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                 f"🌐 Fuente: {request['source']}\n"
                 f"🕒 Fecha: {request['date']}\n\n"
                 f"¿Quieres marcar esta solicitud como prioritaria? 👇",
@@ -583,12 +601,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status_message = "🚫 Solicitud NO Aceptada" if status == "not_accepted" else "✅ Solicitud Subida"
             notification = (
                 f"📢 **Actualización de Solicitud** 📩\n"
-                f"👤 @{request['username']}\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
                 f"🎟️ **Ticket #{ticket}**\n"
-                f"📝 Mensaje: {request['message']}\n"
-                f"🏠 Grupo: {request['group_name']}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                 f"🌐 Fuente: EntresHijos\n"
-                f"{status_message}\n"
+                f"🕒 Fecha: {request['date']}\n"
+                f"📋 Estado: {status_message}\n"
             )
             if status == "uploaded":
                 notification += "Por favor, usa la lupa en el canal correspondiente para encontrar tu solicitud. 🔍"
@@ -600,20 +619,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=notification,
                 parse_mode="Markdown"
             )
-            await context.bot.send_message(
-                chat_id=request["user_id"],
-                text=notification,
-                parse_mode="Markdown"
-            )
 
             await query.edit_message_text(
                 f"✅ **Solicitud Procesada** 🎉\n"
-                f"👤 @{request['username']}\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
                 f"🎟️ Ticket #{ticket}\n"
-                f"📝 Mensaje: {request['message']}\n"
-                f"🏠 Grupo: {request['group_name']}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                 f"🌐 Fuente: EntresHijos\n"
-                f"{status_message}",
+                f"📋 Estado: {status_message}",
                 parse_mode="Markdown"
             )
     elif action.startswith("priority_"):
@@ -625,12 +639,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if status == "yes":
                 request["priority"] = True
                 save_requests(data)
+                notification = (
+                    f"📢 **Solicitud Priorizada** 🔥\n"
+                    f"👤 @{escape_markdown(request['username'])}\n"
+                    f"🎟️ **Ticket #{ticket}**\n"
+                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
+                    f"🌐 Fuente: EntresHijos\n"
+                    f"🕒 Fecha: {request['date']}\n"
+                    f"📋 Estado: Marcada como prioritaria.\n"
+                    f"¡Se procesará pronto! 🚀"
+                )
+                await context.bot.send_message(
+                    chat_id=request["group_id"],
+                    text=notification,
+                    parse_mode="Markdown"
+                )
                 await query.edit_message_text(
                     f"✅ **Prioridad Activada** 🔥\n"
-                    f"👤 @{request['username']}\n"
+                    f"👤 @{escape_markdown(request['username'])}\n"
                     f"🎟️ Ticket #{ticket}\n"
-                    f"📝 Mensaje: {request['message']}\n"
-                    f"🏠 Grupo: {request['group_name']}\n"
+                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
                     f"🌐 Fuente: EntresHijos\n"
                     f"¡Marcada como prioritaria con éxito! 🙌",
                     parse_mode="Markdown"
