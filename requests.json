@@ -1,16 +1,4 @@
 {
-    "requests": [
-        {
-            "ticket": 6,
-            "user_id": 479044122,
-            "username": "galaloki",
-            "message": "una euromillones premiada",
-            "group_id": -1001918569531,
-            "group_name": "SALA DE ENTRESHIJOS.\ud83d\udcfd*/",
-            "date": "2025-03-09 11:14:21",
-            "source": "EntresHijos",
-            "priority": false
-        }
-    ],
-    "last_ticket": 6
+    "requests": [],
+    "last_ticket": 7
 }
