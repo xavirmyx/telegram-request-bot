@@ -3,13 +3,13 @@ import os
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
 from telegram.helpers import escape_markdown
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 import traceback
 
-# Configurar logging con detalles de errores y confirmaciones
+# === CONSTANTES ===
 logging.basicConfig(
     filename='bot.log',
     level=logging.INFO,
@@ -17,16 +17,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_GROUP_ID = "-1002305997509"  # ID del grupo de administradores
+BOT_ID = 7714399570  # ID del bot a añadir como administrador
 REQUEST_LIMIT = 2  # Límite de solicitudes por usuario cada 24 horas
-
-# Archivo para la base de datos de solicitudes
 DB_FILE = "requests.json"
+BLACKLIST_FILE = "blacklist.json"
+AUTO_DELETE_TIME = 120  # 2 minutos en segundos
 
-# Cargar o inicializar la base de datos con limpieza de solicitudes antiguas
+# === FUNCIONES UTILITARIAS ===
 def load_requests():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f:
@@ -41,177 +41,169 @@ def load_requests():
         deleted_count = original_count - len(data["requests"])
         if deleted_count > 0:
             save_requests(data)
-            logger.info(f"Se eliminaron {deleted_count} solicitudes antiguas (mayores a 30 días)")
+            logger.info(f"🗑️ Eliminadas {deleted_count} solicitudes antiguas (EntresHijos)")
         return data
     return {"requests": [], "last_ticket": 0}
 
-# Guardar la base de datos
 def save_requests(data):
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# Generar un nuevo número de ticket
 def generate_ticket():
     data = load_requests()
     data["last_ticket"] += 1
     save_requests(data)
     return data["last_ticket"]
 
-# Contar solicitudes de un usuario en las últimas 24 horas y obtener la primera fecha
 def count_user_requests(user_id):
     data = load_requests()
     now = datetime.now()
     cutoff_time = now - timedelta(hours=24)
     user_requests = [req for req in data["requests"] if req["user_id"] == user_id and datetime.strptime(req["date"], "%Y-%m-%d %H:%M:%S") > cutoff_time]
-    first_request_time = min([datetime.strptime(req["date"], "%Y-%m-%d %H:%M:%S") for req in user_requests], default=None)
-    return len(user_requests), first_request_time
+    return len(user_requests), min([datetime.strptime(req["date"], "%Y-%m-%d %H:%M:%S") for req in user_requests], default=None)
 
-# Verificar si el usuario es administrador en el grupo de admins
+def load_blacklist():
+    if os.path.exists(BLACKLIST_FILE):
+        with open(BLACKLIST_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_blacklist(blacklist):
+    with open(BLACKLIST_FILE, "w") as f:
+        json.dump(blacklist, f, indent=4)
+
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_GROUP_ID:
-        await context.bot.send_message(chat_id=chat_id, text="❌ ¡Ups! Este comando solo funciona en el grupo de administradores. 😊")
-        logger.warning(f"Intento de uso de comando admin fuera de grupo permitido por usuario {user.id}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ ¡Solo en el grupo de admins de EntresHijos! 😊")
+        logger.warning(f"🚫 Intento de comando admin por {user.id} fuera de grupo")
         return False
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
+        # Asegurar que el bot (BOT_ID) esté en la lista de admins
+        bot_admin = any(admin.user.id == BOT_ID for admin in admins)
+        if not bot_admin:
+            logger.warning(f"⚠️ Bot ID {BOT_ID} no es administrador en {ADMIN_GROUP_ID}")
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ El bot necesita ser administrador. Añade al ID 7714399570.")
         return any(admin.user.id == user.id for admin in admins)
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error al verificar administradores: {str(e)}")
-        logger.error(f"Error al verificar administradores: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error al verificar admins: {str(e)} - EntresHijos")
+        logger.error(f"❌ Error al verificar admins: {str(e)}")
         return False
 
-# Eliminar mensajes anteriores de comandos de administrador (usando un enfoque alternativo)
 async def clean_admin_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int, current_message_id: int):
     try:
-        # Usar getUpdates para obtener mensajes recientes (alternativa a get_chat_history)
         updates = await context.bot.get_updates(offset=-1, limit=50)
         for update in updates:
             if (update.message and update.message.chat_id == chat_id and
                 update.message.message_id != current_message_id and
                 update.message.from_user and update.message.from_user.is_bot):
-                admin_commands = ["/vp", "/bp", "/reply", "/rs", "/stats", "/pendiente", "/menu"]
-                if (any(cmd in update.message.text for cmd in admin_commands) or
-                    "Acciones disponibles" in update.message.text or
-                    "Solicitud - Ticket" in update.message.text or
-                    "Respuesta Enviada" in update.message.text or
-                    "Refrescada" in update.message.text or
-                    "Estadísticas" in update.message.text):
+                admin_keywords = ["/tickets", "/blacklist", "/unblacklist", "Solicitud - Ticket", "Respuesta Enviada", "Estadísticas"]
+                if any(keyword in update.message.text for keyword in admin_keywords):
                     try:
                         await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-                        logger.info(f"Mensaje eliminado (ID: {update.message.message_id}) para mantener el grupo limpio")
+                        logger.info(f"🗑️ Mensaje eliminado (ID: {update.message.message_id}) en grupo admin")
                     except TelegramError as e:
-                        logger.warning(f"No se pudo eliminar mensaje (ID: {update.message.message_id}): {str(e)}")
+                        logger.warning(f"⚠️ No se pudo eliminar mensaje (ID: {update.message.message_id}): {str(e)}")
     except Exception as e:
-        logger.error(f"Error al limpiar mensajes: {str(e)}")
+        logger.error(f"❌ Error al limpiar mensajes: {str(e)}")
 
-# Autoeliminar mensaje después de 2 minutos
 async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
-    """Callback para eliminar un mensaje después de 2 minutos."""
     job = context.job
     if job.context:
         try:
             chat_id, message_id = job.context
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            logger.info(f"Mensaje autoeliminado (Chat ID: {chat_id}, Message ID: {message_id})")
+            logger.info(f"🕒 Mensaje autoeliminado (Chat ID: {chat_id}, Message ID: {message_id})")
         except TelegramError as e:
-            logger.warning(f"No se pudo autoeliminar mensaje (Chat ID: {chat_id}, Message ID: {message_id}): {str(e)}")
+            logger.warning(f"⚠️ No se pudo autoeliminar mensaje (Chat ID: {chat_id}, Message ID: {message_id}): {str(e)}")
 
-# Manejador de errores global con detalles
+# === MANEJADORES DE ERRORES ===
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error_details = f"Update {update} caused error {context.error}\n{traceback.format_exc()}"
-    logger.error(error_details)
+    logger.error(f"❌ {error_details}")
     if update and update.message:
-        try:
-            msg = await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
-            context.job_queue.run_once(auto_delete_message, 120, data=(update.message.chat_id, msg.message_id))
-        except TelegramError as e:
-            logger.error(f"Error al enviar mensaje de error: {str(e)}")
+        msg = await update.message.reply_text("❌ ¡Error en EntresHijos! Intenta de nuevo o contacta a un admin. 😊")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
 
-# Mensaje de bienvenida al iniciar el bot
+# === COMANDOS PRINCIPALES ===
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = (
-        "🌟 **¡Bienvenido a Grupos-EntresHijos Bot!** 🌟\n"
-        "📢 Este bot está diseñado exclusivamente para gestionar solicitudes en los grupos de EntresHijos.\n"
+    welcome_text = (
+        "🌟 **¡Bienvenido a EntresHijos Bot!** 🌟\n"
+        "📢 Gestiona solicitudes para la comunidad EntresHijos.\n"
         "👥 Usa `/solicito <mensaje>` para enviar una solicitud.\n"
-        "👑 Los administradores pueden usar `/menu` para ver los comandos disponibles.\n"
+        "👑 Admins, usa `/tickets` o `/blacklist` para gestionar.\n"
         "ℹ️ ¡Estamos aquí para ayudarte! 🙌"
     )
     keyboard = [
         [InlineKeyboardButton("📝 Enviar Solicitud", callback_data="solicito_start")],
-        [InlineKeyboardButton("ℹ️ Ver Menú", callback_data="menu_start")]
+        [InlineKeyboardButton("ℹ️ Menú Admin", callback_data="tickets_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    msg = await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode="Markdown")
-    context.job_queue.run_once(auto_delete_message, 120, data=(update.message.chat_id, msg.message_id))
-    logger.info(f"Usuario {update.effective_user.id} ejecutó comando /start")
+    msg = await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+    logger.info(f"🌱 Usuario {update.effective_user.id} ejecutó /start")
 
-# Manejar acciones de botones iniciales
 async def button_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     action = query.data
     if action == "solicito_start":
         msg = await query.edit_message_text(
-            "📝 **Enviar Solicitud**\n"
-            "Por favor, usa el comando `/solicito <tu_mensaje>` para enviar tu solicitud. Ejemplo: `/solicito Necesito ayuda`. 😊"
+            "📝 **Enviar Solicitud - EntresHijos**\n"
+            "Usa `/solicito <tu_mensaje>` (ej. `/solicito Necesito ayuda`). 😊"
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-        logger.info(f"Usuario {update.effective_user.id} accedió a enviar solicitud desde botón")
-    elif action == "menu_start":
-        await menu_command(update, context)
-        logger.info(f"Usuario {update.effective_user.id} accedió al menú desde botón")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+        logger.info(f"📝 Usuario {update.effective_user.id} accedió a enviar solicitud")
+    elif action == "tickets_start":
+        await tickets_command(update, context)
+        logger.info(f"🔧 Usuario {update.effective_user.id} accedió al menú de tickets")
 
-# Comando /solicito - Cualquier usuario (con límite para no administradores)
-async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def solicito_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     message = " ".join(context.args)
 
-    if not message:
+    blacklist = load_blacklist()
+    if any(user.id == entry["user_id"] for entry in blacklist):
         msg = await update.message.reply_text(
-            "❌ ¡Hey! Necesitas escribir un mensaje. Ejemplo: `/solicito Quiero ayuda`. 😊"
+            f"⛔ @{escape_markdown(user.username or f'Usuario_{user.id}')} estás en la blacklist de EntresHijos. No puedes enviar solicitudes. 😔"
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.warning(f"Intento de solicitud sin mensaje por usuario {user.id}")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.warning(f"⛔ Usuario {user.id} intentó solicitar estando en blacklist")
+        return
+
+    if not message:
+        msg = await update.message.reply_text("❌ ¡Ingresa un mensaje! Ejemplo: `/solicito Necesito ayuda` - EntresHijos. 😊")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.warning(f"🚫 Intento de solicitud sin mensaje por {user.id}")
         return
 
     try:
         is_admin_user = await context.bot.get_chat_member(ADMIN_GROUP_ID, user.id)
         is_admin_flag = is_admin_user.status in ["administrator", "creator"]
     except TelegramError as e:
-        msg = await update.message.reply_text(f"❌ Error al verificar estado de administrador: {str(e)}")
-        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.error(f"Error al verificar administrador en solicitud: {str(e)}")
+        msg = await update.message.reply_text(f"❌ Error al verificar admin: {str(e)} - EntresHijos.")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.error(f"❌ Error al verificar admin: {str(e)}")
         return
 
     username = user.username or f"Usuario_{user.id}"
-
     if not is_admin_flag:
-        request_count, first_request_time = count_user_requests(user.id)
+        request_count, _ = count_user_requests(user.id)
         if request_count >= REQUEST_LIMIT:
-            if first_request_time:
-                reset_time = first_request_time + timedelta(hours=24)
-                time_left = reset_time - datetime.now()
-                hours_left = int(time_left.total_seconds() // 3600)
-                minutes_left = int((time_left.total_seconds() % 3600) // 60)
-                msg = await update.message.reply_text(
-                    f"⛔ ¡Lo siento, @{escape_markdown(username)}! Has agotado tus {REQUEST_LIMIT} solicitudes diarias. 😔\n"
-                    f"⏳ Podrás hacer más en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')}).\n"
-                    f"¡Paciencia! 🌟"
-                )
-                context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-                logger.info(f"Usuario {username} alcanzó el límite de solicitudes")
-                if request_count > REQUEST_LIMIT:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"/warn @{escape_markdown(username)} Abuso de peticiones diarias."
-                    )
+            reset_time = datetime.now() + timedelta(hours=24)
+            time_left = reset_time - datetime.now()
+            hours_left = int(time_left.total_seconds() // 3600)
+            minutes_left = int((time_left.total_seconds() % 3600) // 60)
+            msg = await update.message.reply_text(
+                f"⛔ @{escape_markdown(username)}, agotaste tus {REQUEST_LIMIT} solicitudes diarias - EntresHijos. 😔\n"
+                f"⏳ Vuelve en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')})."
+            )
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+            logger.info(f"⏰ Límite alcanzado por {username}")
             return
-        else:
-            remaining_requests = REQUEST_LIMIT - request_count - 1
 
     ticket = generate_ticket()
     group_name = update.effective_chat.title or "Grupo sin nombre"
@@ -233,59 +225,51 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_requests(data)
 
     response_text = (
-        f"✅ **¡Solicitud Registrada!** 🎉\n"
+        f"✅ **Solicitud Registrada - EntresHijos** 🎉\n"
         f"👤 @{escape_markdown(username)}\n"
-        f"🎟️ **Ticket #{ticket}**\n"
+        f"🎟️ Ticket #{ticket}\n"
         f"📝 Mensaje: {escape_markdown(message)}\n"
         f"🏠 Grupo: {escape_markdown(group_name)}\n"
-        f"🌐 Fuente: EntresHijos\n"
-        f"🕒 Fecha: {request['date']}\n"
-        f"¡Gracias por tu paciencia! 🙌"
+        f"🕒 Fecha: {request['date']}"
     )
     if not is_admin_flag:
-        response_text += f"\n📊 **Solicitudes restantes hoy**: {remaining_requests}"
+        response_text += f"\n📊 Solicitudes restantes: {REQUEST_LIMIT - request_count - 1}"
 
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=response_text,
-        parse_mode="Markdown"
-    )
-    context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
+    msg = await context.bot.send_message(chat_id=chat_id, text=response_text, parse_mode="Markdown")
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
 
-    await context.bot.send_message(
+    queue_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"📢 **Solicitud en Cola** ⏳\n"
+            f"📢 **Solicitud en Cola - EntresHijos** ⏳\n"
             f"👤 @{escape_markdown(username)}\n"
-            f"🎟️ **Ticket #{ticket}**\n"
+            f"🎟️ Ticket #{ticket}\n"
             f"📝 Mensaje: {escape_markdown(message)}\n"
             f"🏠 Grupo: {escape_markdown(group_name)}\n"
-            f"🌐 Fuente: EntresHijos\n"
             f"🕒 Fecha: {request['date']}\n"
-            f"📋 Estado: En espera de revisión por los administradores.\n"
-            f"¡Te avisaremos cuando haya actualizaciones! 🙌"
+            f"📋 Estado: En espera de revisión."
         ),
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, queue_msg.message_id))
 
     admin_msg = await context.bot.send_message(
         chat_id=ADMIN_GROUP_ID,
         text=(
-            f"🔔 **Nueva Solicitud Registrada** 🔔\n"
-            f"🎟️ **Ticket #{ticket}**\n"
+            f"🔔 **Nueva Solicitud - EntresHijos** 🔔\n"
+            f"🎟️ Ticket #{ticket}\n"
             f"👤 @{escape_markdown(username)}\n"
             f"📝 Mensaje: {escape_markdown(message)}\n"
             f"🏠 Grupo: {escape_markdown(group_name)}\n"
             f"🕒 Fecha: {request['date']}\n"
-            f"Usa `/vp {ticket}` para ver detalles. 📋"
+            f"🔧 Usa /tickets para gestionarla."
         ),
         parse_mode="Markdown"
     )
-    context.job_queue.run_once(auto_delete_message, 120, data=(ADMIN_GROUP_ID, admin_msg.message_id))
-    logger.info(f"Solicitud registrada - Ticket #{ticket} por @{username}")
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(ADMIN_GROUP_ID, admin_msg.message_id))
+    logger.info(f"📥 Solicitud registrada - Ticket #{ticket} por @{username}")
 
-# Comando /vp - Solo administradores (usando número de ticket con botones)
-async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tickets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
@@ -293,581 +277,363 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not data["requests"]:
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊"
+            text="📪 **Sin Solicitudes - EntresHijos** 😊\nNo hay tickets pendientes."
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.info("No hay solicitudes pendientes")
         return
 
-    if context.args and context.args[0].isdigit():
-        ticket = int(context.args[0])
-        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
-        if request:
-            status_mark = f"📋 Estado: {request['status']}" if request["status"] else "📋 Estado: En espera"
-            priority_mark = "🔥 **Prioridad**" if request["priority"] else ""
-            keyboard = [
-                [InlineKeyboardButton("🗑️ Eliminar", callback_data=f"delete_{ticket}_view")],
-                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"priority_{ticket}_view")],
-                [InlineKeyboardButton("📩 Enviar Mensaje", callback_data=f"send_message_{ticket}_view")],
-                [InlineKeyboardButton("🔙 Volver", callback_data="menu_start")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"📋 **Solicitud - Ticket #{ticket}** {priority_mark}\n"
-                     f"👤 @{escape_markdown(request['username'])}\n"
-                     f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                     f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                     f"🌐 Fuente: {request['source']}\n"
-                     f"🕒 Fecha: {request['date']}\n"
-                     f"{status_mark}\n",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-            await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-            logger.info(f"Visualización de solicitud - Ticket #{ticket}")
-        else:
-            msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"❌ No se encontró el Ticket #{ticket}. 😕"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-            await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-            logger.warning(f"Ticket #{ticket} no encontrado")
-        return
-    else:
-        sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
-        keyboard = []
-        for req in sorted_requests:
-            status_mark = f" ({req['status']})" if req["status"] != "en espera" else ""
-            button_text = f"🎟️ Ticket #{req['ticket']}{status_mark} (@{req['username']})"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"view_select_{req['ticket']}")])
-        keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="menu_start")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="📋 **Lista de Solicitudes Pendientes** 🌟\nSelecciona un ticket para ver detalles: 👇",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-        await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.info("Lista de solicitudes mostrada")
+    keyboard = [
+        [InlineKeyboardButton("📋 Ver Tickets", callback_data="view_tickets")],
+        [InlineKeyboardButton("🔙 Volver", callback_data="tickets_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="🔧 **Menú de Gestión - EntresHijos** 🔧\nSelecciona una opción:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
+    await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
+    logger.info("🔧 Menú de tickets mostrado")
 
-# Comando /bp - Solo administradores (lista de tickets con botones)
-async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    data = load_requests()
-    if not data["requests"]:
+    keyboard = [[InlineKeyboardButton("➕ Añadir a Blacklist", callback_data="add_to_blacklist")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⛔ **Blacklist - EntresHijos** ⛔\nPulsa para añadir un usuario a la blacklist.",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
+    await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
+    logger.info("⛔ Menú de blacklist mostrado")
+
+async def unblacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return
+
+    blacklist = load_blacklist()
+    if not blacklist:
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊"
+            text="✅ **Blacklist Vacía - EntresHijos** ✅\nNo hay usuarios bloqueados."
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.info("No hay solicitudes para eliminar")
         return
 
     keyboard = []
-    sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
-    for req in sorted_requests:
-        status_mark = f" ({req['status']})" if req["status"] != "en espera" else ""
-        button_text = f"🎟️ Ticket #{req['ticket']}{status_mark} (@{req['username']})"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_select_{req['ticket']}")])
-    keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="menu_start")])
+    for entry in blacklist:
+        button_text = f"❌ @{escape_markdown(entry['username'])} (ID: {entry['user_id']})"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_from_blacklist_{entry['user_id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="blacklist_start")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="🗑️ **Seleccionar Solicitud para Eliminar** 🛠️\nElige un ticket para procesar: 👇",
+        text="✅ **Lista de Blacklist - EntresHijos** ✅\nSelecciona un usuario para desbloquear:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
-    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+    context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-    logger.info("Lista de solicitudes para eliminar mostrada")
+    logger.info("✅ Menú de unblacklist mostrado")
 
-# Comando /reply - Solo administradores (responder a una solicitud)
 async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
-
     if not context.args or len(context.args) < 2:
-        msg = await update.message.reply_text("❌ Uso: `/reply <ticket> <mensaje>`", parse_mode="Markdown")
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+        msg = await update.message.reply_text("❌ Uso: `/reply <ticket> <mensaje>` - EntresHijos.", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.warning("Uso incorrecto del comando /reply")
+        logger.warning("🚫 Uso incorrecto de /reply")
         return
-
     try:
         ticket = int(context.args[0])
     except ValueError:
-        msg = await update.message.reply_text("❌ El número de ticket debe ser un valor numérico. Ejemplo: `/reply 1 Hola`")
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+        msg = await update.message.reply_text("❌ Ticket debe ser numérico. Ejemplo: `/reply 1 Hola` - EntresHijos.", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.warning("Número de ticket inválido en comando /reply")
+        logger.warning("🚫 Ticket inválido en /reply")
         return
-
     reply_message = " ".join(context.args[1:])
-
     data = load_requests()
     request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
     if request:
-        try:
-            user_response = (
-                f"📩 **Respuesta a tu Solicitud** 📩\n"
-                f"🎟️ Ticket #{ticket}\n"
-                f"👤 @{escape_markdown(request['username'])}\n"
-                f"📝 Respuesta: {escape_markdown(reply_message)}"
-            )
-            admin_response = (
-                f"📢 **Respuesta Enviada** 📩\n"
-                f"🎟️ Ticket #{ticket}\n"
-                f"👤 @{escape_markdown(request['username'])}\n"
-                f"📝 Mensaje: {escape_markdown(reply_message)}"
-            )
-            await context.bot.send_message(
-                chat_id=request["group_id"],
-                text=user_response,
-                parse_mode="Markdown"
-            )
-            msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=admin_response,
-                parse_mode="Markdown"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-            await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-            logger.info(f"Respuesta enviada para Ticket #{ticket}: {reply_message}")
-        except TelegramError as e:
-            msg = await update.message.reply_text(f"❌ Error al enviar la respuesta: {str(e)}")
-            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-            await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-            logger.error(f"Error al enviar respuesta para Ticket #{ticket}: {str(e)}")
-    else:
-        msg = await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado", parse_mode="Markdown")
-        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
+        user_response = (
+            f"📩 **Respuesta - EntresHijos** 📩\n"
+            f"🎟️ Ticket #{ticket}\n"
+            f"👤 @{escape_markdown(request['username'])}\n"
+            f"📝 Respuesta: {escape_markdown(reply_message)}"
+        )
+        admin_response = (
+            f"📢 **Respuesta Enviada - EntresHijos** 📢\n"
+            f"🎟️ Ticket #{ticket}\n"
+            f"👤 @{escape_markdown(request['username'])}\n"
+            f"📝 Mensaje: {escape_markdown(reply_message)}"
+        )
+        await context.bot.send_message(chat_id=request["group_id"], text=user_response, parse_mode="Markdown")
+        msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=admin_response, parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-        logger.warning(f"Ticket #{ticket} no encontrado para responder")
+        logger.info(f"📩 Respuesta enviada para Ticket #{ticket}")
+    else:
+        msg = await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado - EntresHijos.", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.effective_chat.id, msg.message_id))
+        await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
+        logger.warning(f"🚫 Ticket #{ticket} no encontrado")
 
-# Comando /rs - Solo administradores con botones
-async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("🔄 Refrescar Ahora", callback_data="rs_yes")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="rs_no")],
-        [InlineKeyboardButton("🔙 Volver", callback_data="menu_start")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="🔄 **Refrescar Base de Datos** ✨\n"
-             "📢 ¿Deseas refrescar la base de datos de solicitudes? Esto actualizará los datos actuales. 😊\n"
-             "Confirma tu elección: 👇",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-    await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-    logger.info("Comando /rs ejecutado, esperando confirmación")
-
-# Comando /menu - Solo administradores con botones
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return
-
-    menu_text = (
-        "📖 **Menú de Comandos - EntresHijos** 🌟\n\n"
-        "👤 **Para todos:**\n"
-        "🔹 `/solicito <mensaje>` - Envía una solicitud (máx. 2 por día para no admins).\n"
-        "🔹 `/pendiente <ticket>` - Consulta el estado de tu solicitud.\n\n"
-        "👑 **Solo administradores:**\n"
-        "🔹 `/vp <número_de_ticket>` - Muestra detalles de una solicitud o lista todas.\n"
-        "🔹 `/bp` - Elimina una solicitud seleccionando un ticket.\n"
-        "🔹 `/reply <ticket> <mensaje>` - Responde a una solicitud específica.\n"
-        "🔹 `/rs` - Refresca la base de datos.\n"
-        "🔹 `/stats` - Muestra estadísticas de solicitudes.\n"
-        "🔹 `/menu` - Este menú.\n\n"
-        "ℹ️ **Nota:** Solo admins pueden usar estos comandos aquí."
-    )
-    keyboard = [
-        [InlineKeyboardButton("📋 Ver Solicitudes", callback_data="vp_start")],
-        [InlineKeyboardButton("🗑️ Eliminar Solicitud", callback_data="bp_start")],
-        [InlineKeyboardButton("📩 Responder Solicitud", callback_data="reply_start")],
-        [InlineKeyboardButton("🔄 Refrescar", callback_data="rs_start")],
-        [InlineKeyboardButton("📊 Estadísticas", callback_data="stats_start")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=menu_text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-    await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-    logger.info("Menú mostrado al usuario")
-
-# Comando /stats - Solo administradores con botones
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return
-
-    data = load_requests()
-    total_requests = len(data["requests"])
-    groups = {}
-    users = {}
-    for req in data["requests"]:
-        groups[req["group_name"]] = groups.get(req["group_name"], 0) + 1
-        users[req["username"]] = users.get(req["username"], 0) + 1
-
-    group_stats = "\n".join([f"🏠 {escape_markdown(group)}: {count} solicitudes" for group, count in groups.items()])
-    top_users = "\n".join([f"👤 @{escape_markdown(user)}: {count} solicitudes" for user, count in sorted(users.items(), key=lambda x: x[1], reverse=True)[:3]])
-
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📊 **Estadísticas - EntresHijos** 🌟\n\n"
-             f"🔢 **Total de Solicitudes**: {total_requests}\n\n"
-             f"🏡 **Por Grupo**:\n{group_stats}\n\n"
-             f"👥 **Usuarios Más Activos (Top 3)**:\n{top_users}\n"
-             f"¡Gracias por mantener todo en marcha! 🙌",
-        parse_mode="Markdown"
-    )
-    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
-    await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
-    logger.info("Estadísticas mostradas")
-
-# Comando /pendiente - Para usuarios
 async def pendiente_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     if not context.args or not context.args[0].isdigit():
-        msg = await update.message.reply_text("❌ Uso: `/pendiente <ticket>`. Proporciona el número de ticket. 😊")
-        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.warning(f"Intento de /pendiente sin ticket válido por usuario {user.id}")
+        msg = await update.message.reply_text("❌ Uso: `/pendiente <ticket>` - EntresHijos. 😊", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.warning(f"🚫 Intento de /pendiente sin ticket por {user.id}")
         return
-
     ticket = int(context.args[0])
     data = load_requests()
     request = next((req for req in data["requests"] if req["ticket"] == ticket and req["user_id"] == user.id), None)
     if request:
         status = request.get("status", "en espera")
         response_text = (
-            f"ℹ️ **Información de Solicitud - Ticket #{ticket}** ℹ️\n"
+            f"ℹ️ **Estado - EntresHijos** ℹ️\n"
+            f"🎟️ Ticket #{ticket}\n"
             f"👤 @{escape_markdown(request['username'])}\n"
             f"📝 Mensaje: {escape_markdown(request['message'])}\n"
             f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
             f"🕒 Fecha: {request['date']}\n"
-            f"📋 Estado: {status}\n"
+            f"📋 Estado: {status}"
         )
         if status == "subida":
-            response_text += "🔍 Usa la lupa en el canal correspondiente para encontrar tu solicitud."
+            response_text += "\n🔍 Busca en el canal correspondiente."
         elif status == "no aceptada":
-            response_text += "❌ Tu solicitud no fue aceptada. Contacta a un administrador si necesitas ayuda."
+            response_text += "\n❌ Contacta a un admin si necesitas ayuda."
         msg = await update.message.reply_text(response_text, parse_mode="Markdown")
-        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.info(f"Información de solicitud mostrada - Ticket #{ticket} para @{request['username']}")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.info(f"ℹ️ Estado de Ticket #{ticket} mostrado a @{request['username']}")
     else:
-        msg = await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado o no te pertenece. 😕", parse_mode="Markdown")
-        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.warning(f"Ticket #{ticket} no encontrado o no pertenece a usuario {user.id}")
+        msg = await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado o no te pertenece - EntresHijos. 😕", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(chat_id, msg.message_id))
+        logger.warning(f"🚫 Ticket #{ticket} no encontrado para {user.id}")
 
-# Manejar las acciones de los botones
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     action = query.data
 
-    if action == "view_all":
+    if action == "solicito_start":
+        msg = await query.edit_message_text(
+            "📝 **Enviar Solicitud - EntresHijos**\n"
+            "Usa `/solicito <tu_mensaje>` (ej. `/solicito Necesito ayuda`). 😊"
+        )
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+    elif action == "tickets_start":
+        await tickets_command(update, context)
+    elif action == "view_tickets":
         data = load_requests()
         sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
-        message = "📋 **Solicitudes Detalladas** 🌟\n📅 Ordenadas de más antiguas a más recientes:\n\n"
+        if not sorted_requests:
+            msg = await query.edit_message_text("📪 **Sin Solicitudes - EntresHijos** 😊\nNo hay tickets pendientes.")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+            return
+        keyboard = []
         for req in sorted_requests:
-            priority_mark = "🔥 **Prioridad**" if req["priority"] else ""
-            status_mark = f" (Estado: {req['status']})" if req["status"] != "en espera" else ""
-            message += (
-                f"🎟️ **Ticket #{req['ticket']}** {priority_mark}{status_mark}\n"
-                f"👤 @{escape_markdown(req['username'])}\n"
-                f"📝 Mensaje: {escape_markdown(req['message'])}\n"
-                f"🏠 Grupo: {escape_markdown(req['group_name'])}\n"
-                f"🕒 Fecha: {req['date']}\n"
-                f"➖➖➖➖➖➖➖\n"
-            )
+            status_mark = f" ({req['status']})" if req["status"] != "en espera" else ""
+            button_text = f"🎟️ Ticket #{req['ticket']}{status_mark} (@{req['username']})"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"manage_{req['ticket']}")])
+        keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="tickets_start")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        msg = await query.edit_message_text(
+            "📋 **Lista de Tickets - EntresHijos** 📋\nSelecciona un ticket para gestionarlo:",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+    elif action.startswith("manage_"):
+        ticket = int(action.split("_")[1])
+        data = load_requests()
+        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
+        if not request:
+            msg = await query.edit_message_text(f"❌ Ticket #{ticket} no encontrado - EntresHijos. 😕")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+            return
         keyboard = [
-            [InlineKeyboardButton("🔙 Volver", callback_data="menu_start")]
+            [InlineKeyboardButton("❌ Denegar", callback_data=f"deny_{ticket}")],
+            [InlineKeyboardButton("✅ Aceptar", callback_data=f"accept_{ticket}")],
+            [InlineKeyboardButton("📩 Responder", callback_data=f"reply_{ticket}")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="view_tickets")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="Markdown")
-        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-        await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-        logger.info("Vista detallada de solicitudes mostrada")
-        return
-    elif action == "menu_start":
-        await menu_command(update, context)
-        logger.info("Regreso al menú desde botón")
-        return
-    elif action in ["rs_yes", "rs_no"]:
-        if action == "rs_yes":
-            data = load_requests()  # Recargar la base de datos
-            msg = await query.edit_message_text(
-                "🔄 **¡Base de Datos Refrescada!** ✨\n"
-                "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
-                parse_mode="Markdown"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.info("Base de datos refrescada")
-        elif action == "rs_no":
-            msg = await query.edit_message_text("❌ Operación cancelada. No se refrescó la base de datos. 😊", parse_mode="Markdown")
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.info("Refresco de base de datos cancelado")
-        return
-    elif action.startswith("view_select_"):
-        ticket = int(action.split("_")[2])
-        context.args = [str(ticket)]
-        await view_requests_command(update, context)
-        logger.info(f"Selección de ticket #{ticket} para ver detalles")
-
-    if action.startswith("delete_select_"):
-        ticket = int(action.split("_")[2])
-        data = load_requests()
-        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
-        if request:
-            keyboard = [
-                [InlineKeyboardButton("🚫 Solicitud NO Aceptada", callback_data=f"delete_{ticket}_not_accepted")],
-                [InlineKeyboardButton("✅ Solicitud Subida", callback_data=f"delete_{ticket}_uploaded")],
-                [InlineKeyboardButton("🔙 Volver", callback_data="menu_start")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            msg = await query.edit_message_text(
-                f"🗑️ **Eliminar Solicitud - Ticket #{ticket}** 🛠️\n"
-                f"👤 @{escape_markdown(request['username'])}\n"
-                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                f"🌐 Fuente: {request['source']}\n"
-                f"🕒 Fecha: {request['date']}\n\n"
-                f"¿Qué hacemos con esta solicitud? 👇",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.info(f"Selección para eliminar Ticket #{ticket}")
-    elif action.startswith("priority_select_"):
-        ticket = int(action.split("_")[2])
-        data = load_requests()
-        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
-        if request:
-            keyboard = [
-                [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"priority_{ticket}_yes")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data=f"priority_{ticket}_no")],
-                [InlineKeyboardButton("🔙 Volver", callback_data="menu_start")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            msg = await query.edit_message_text(
-                f"🔥 **Priorizar Solicitud - Ticket #{ticket}** ✨\n"
-                f"👤 @{escape_markdown(request['username'])}\n"
-                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                f"🌐 Fuente: {request['source']}\n"
-                f"🕒 Fecha: {request['date']}\n\n"
-                f"¿Quieres marcar esta solicitud como prioritaria? 👇",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.info(f"Selección para priorizar Ticket #{ticket}")
-    elif action.startswith("send_message_"):
-        ticket = int(action.split("_")[2])
         msg = await query.edit_message_text(
-            f"📩 **Enviar Mensaje - Ticket #{ticket}** 📩\n"
-            "Por favor, usa el comando `/reply {ticket} <mensaje>` para enviar un mensaje al usuario. Ejemplo: `/reply {ticket} Hola, tu solicitud fue procesada.` 😊",
+            f"📋 **Ticket #{ticket} - EntresHijos** 📋\n"
+            f"👤 @{escape_markdown(request['username'])}\n"
+            f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+            f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
+            f"🕒 Fecha: {request['date']}\n"
+            f"📋 Estado: {request.get('status', 'en espera')}\n"
+            f"🔧 ¿Qué acción deseas tomar?",
+            reply_markup=reply_markup,
             parse_mode="Markdown"
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-        await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-        logger.info(f"Botón de enviar mensaje para Ticket #{ticket} activado")
-    elif action.startswith("delete_"):
-        parts = action.split("_")
-        if len(parts) < 3:
-            msg = await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.error("Formato de acción delete_ inválido")
-            return
-        ticket = int(parts[1])
-        status = parts[2]
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+    elif action.startswith("deny_"):
+        ticket = int(action.split("_")[1])
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
         if request:
-            if status in ["not_accepted", "uploaded"]:
-                request["status"] = "subida" if status == "uploaded" else "no aceptada"
-                data["requests"] = [req for req in data["requests"] if req["ticket"] != ticket]
-                save_requests(data)
-                status_message = "✅ Solicitud Subida" if status == "uploaded" else "🚫 Solicitud NO Aceptada"
-                notification = (
-                    f"📢 **Actualización de Solicitud** 📩\n"
-                    f"👤 @{escape_markdown(request['username'])}\n"
-                    f"🎟️ **Ticket #{ticket}**\n"
-                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                    f"🌐 Fuente: EntresHijos\n"
-                    f"🕒 Fecha: {request['date']}\n"
-                    f"📋 Estado: {status_message}\n"
-                )
-                if status == "uploaded":
-                    notification += "🔍 Usa la lupa en el canal correspondiente para encontrar tu solicitud."
-                elif status == "no aceptada":
-                    notification += "❌ Tu solicitud no fue aceptada. Contacta a un administrador si necesitas ayuda."
-                msg = await context.bot.send_message(
-                    chat_id=request["group_id"],
-                    text=notification,
-                    parse_mode="Markdown"
-                )
-                context.job_queue.run_once(auto_delete_message, 120, data=(request["group_id"], msg.message_id))
-
-                # Eliminar el mensaje original "Solicitud en Cola"
-                try:
-                    updates = await context.bot.get_updates(offset=-1, limit=50)
-                    for update in updates:
-                        if (update.message and update.message.chat_id == request["group_id"] and
-                            f"Ticket #{ticket}" in update.message.text and "Solicitud en Cola" in update.message.text):
-                            await context.bot.delete_message(chat_id=request["group_id"], message_id=update.message.message_id)
-                            logger.info(f"Mensaje original eliminado (Ticket #{ticket}, Chat ID: {request['group_id']})")
-                            break
-                except TelegramError as e:
-                    logger.error(f"Error al eliminar mensaje original (Ticket #{ticket}): {str(e)}")
-            else:
-                data["requests"].remove(request)
-                save_requests(data)
-                status_message = "Solicitud Eliminada"
-                msg = await query.edit_message_text(
-                    f"✅ **{status_message}** 🎉\n"
-                    f"👤 @{escape_markdown(request['username'])}\n"
-                    f"🎟️ Ticket #{ticket}\n"
-                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                    f"🌐 Fuente: EntresHijos\n"
-                    f"🕒 Fecha: {request['date']}",
-                    parse_mode="Markdown"
-                )
-                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-                await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-
-            logger.info(f"Solicitud procesada - Ticket #{ticket}, Estado: {status_message}")
-    elif action.startswith("priority_"):
-        parts = action.split("_")
-        if len(parts) < 3:
-            msg = await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
-            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-            await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-            logger.error("Formato de acción priority_ inválido")
-            return
-        ticket = int(parts[1])
-        status = parts[2]
+            request["status"] = "no aceptada"
+            data["requests"] = [req for req in data["requests"] if req["ticket"] != ticket]
+            save_requests(data)
+            notification = (
+                f"📢 **Actualización - EntresHijos** 📢\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
+                f"🎟️ Ticket #{ticket}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
+                f"🕒 Fecha: {request['date']}\n"
+                f"❌ Estado: Solicitud NO Aceptada\n"
+                f"Contacta a un admin si necesitas ayuda."
+            )
+            msg = await context.bot.send_message(chat_id=request["group_id"], text=notification, parse_mode="Markdown")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(request["group_id"], msg.message_id))
+            try:
+                updates = await context.bot.get_updates(offset=-1, limit=50)
+                for update in updates:
+                    if (update.message and update.message.chat_id == request["group_id"] and
+                        f"Ticket #{ticket}" in update.message.text and "Solicitud en Cola" in update.message.text):
+                        await context.bot.delete_message(chat_id=request["group_id"], message_id=update.message.message_id)
+                        logger.info(f"🗑️ Mensaje 'Solicitud en Cola' eliminado (Ticket #{ticket})")
+                        break
+            except TelegramError as e:
+                logger.error(f"⚠️ Error al eliminar mensaje original (Ticket #{ticket}): {str(e)}")
+            msg = await query.edit_message_text(
+                f"❌ **Solicitud Denegada - EntresHijos** ❌\n"
+                f"🎟️ Ticket #{ticket} procesado."
+            )
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+            logger.info(f"❌ Ticket #{ticket} denegado")
+    elif action.startswith("accept_"):
+        ticket = int(action.split("_")[1])
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
         if request:
-            if status == "yes":
-                request["priority"] = True
-                save_requests(data)
-                notification = (
-                    f"📢 **Solicitud Priorizada** 🔥\n"
-                    f"👤 @{escape_markdown(request['username'])}\n"
-                    f"🎟️ **Ticket #{ticket}**\n"
-                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                    f"🌐 Fuente: EntresHijos\n"
-                    f"🕒 Fecha: {request['date']}\n"
-                    f"📋 Estado: Marcada como prioritaria.\n"
-                    f"¡Se procesará pronto! 🚀"
-                )
-                msg = await context.bot.send_message(
-                    chat_id=request["group_id"],
-                    text=notification,
-                    parse_mode="Markdown"
-                )
-                context.job_queue.run_once(auto_delete_message, 120, data=(request["group_id"], msg.message_id))
-                msg = await query.edit_message_text(
-                    f"✅ **Prioridad Activada** 🔥\n"
-                    f"👤 @{escape_markdown(request['username'])}\n"
-                    f"🎟️ Ticket #{ticket}\n"
-                    f"📝 Mensaje: {escape_markdown(request['message'])}\n"
-                    f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
-                    f"🌐 Fuente: EntresHijos\n"
-                    f"¡Marcada como prioritaria con éxito! 🙌",
-                    parse_mode="Markdown"
-                )
-                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-                await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-                logger.info(f"Prioridad activada para Ticket #{ticket}")
-            else:
-                msg = await query.edit_message_text("❌ Operación cancelada. La solicitud sigue sin prioridad. 😊", parse_mode="Markdown")
-                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-                await clean_admin_messages(context, query.message.chat_id, msg.message_id)
-                logger.info(f"Priorización cancelada para Ticket #{ticket}")
-
-# Manejar botones de acciones específicas
-async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    action = query.data
-    if action == "vp_start":
-        await view_requests_command(update, context)
-        logger.info("Botón Ver Solicitudes activado")
-    elif action == "bp_start":
-        await delete_request_command(update, context)
-        logger.info("Botón Eliminar Solicitud activado")
-    elif action == "reply_start":
+            request["status"] = "subida"
+            data["requests"] = [req for req in data["requests"] if req["ticket"] != ticket]
+            save_requests(data)
+            notification = (
+                f"📢 **Actualización - EntresHijos** 📢\n"
+                f"👤 @{escape_markdown(request['username'])}\n"
+                f"🎟️ Ticket #{ticket}\n"
+                f"📝 Mensaje: {escape_markdown(request['message'])}\n"
+                f"🏠 Grupo: {escape_markdown(request['group_name'])}\n"
+                f"🕒 Fecha: {request['date']}\n"
+                f"✅ Estado: Solicitud Subida\n"
+                f"🔍 Busca en el canal correspondiente."
+            )
+            msg = await context.bot.send_message(chat_id=request["group_id"], text=notification, parse_mode="Markdown")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(request["group_id"], msg.message_id))
+            try:
+                updates = await context.bot.get_updates(offset=-1, limit=50)
+                for update in updates:
+                    if (update.message and update.message.chat_id == request["group_id"] and
+                        f"Ticket #{ticket}" in update.message.text and "Solicitud en Cola" in update.message.text):
+                        await context.bot.delete_message(chat_id=request["group_id"], message_id=update.message.message_id)
+                        logger.info(f"🗑️ Mensaje 'Solicitud en Cola' eliminado (Ticket #{ticket})")
+                        break
+            except TelegramError as e:
+                logger.error(f"⚠️ Error al eliminar mensaje original (Ticket #{ticket}): {str(e)}")
+            msg = await query.edit_message_text(
+                f"✅ **Solicitud Aceptada - EntresHijos** ✅\n"
+                f"🎟️ Ticket #{ticket} procesado."
+            )
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+            logger.info(f"✅ Ticket #{ticket} aceptado")
+    elif action.startswith("reply_"):
+        ticket = int(action.split("_")[1])
+        data = load_requests()
+        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
+        if request:
+            msg = await query.edit_message_text(
+                f"📩 **Responder - EntresHijos** 📩\n"
+                f"🎟️ Ticket #{ticket}\n"
+                f"Usa `/reply {ticket} <mensaje>` (ej. `/reply {ticket} Solicitud procesada`)."
+            )
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+            logger.info(f"📩 Opción de respuesta para Ticket #{ticket} activada")
+    elif action == "add_to_blacklist":
         msg = await query.edit_message_text(
-            "📩 **Responder a una Solicitud**\n"
-            "Por favor, usa el comando `/reply <ticket> <mensaje>` para enviar una respuesta. Ejemplo: `/reply 1 Hola, tu solicitud fue procesada.` 😊",
+            "⛔ **Añadir a Blacklist - EntresHijos** ⛔\n"
+            "Envía el @name del usuario a bloquear (ej. @username).",
             parse_mode="Markdown"
         )
-        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
-        logger.info("Botón Responder Solicitud activado")
-    elif action == "rs_start":
-        await refresh_requests_command(update, context)
-        logger.info("Botón Refrescar activado")
-    elif action == "stats_start":
-        await stats_command(update, context)
-        logger.info("Botón Estadísticas activado")
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+        context.user_data["awaiting_blacklist"] = True
+        logger.info("⛔ Esperando @name para añadir a blacklist")
+    elif action.startswith("remove_from_blacklist_"):
+        user_id = int(action.split("_")[2])
+        blacklist = load_blacklist()
+        blacklist = [entry for entry in blacklist if entry["user_id"] != user_id]
+        save_blacklist(blacklist)
+        msg = await query.edit_message_text(
+            f"✅ **Usuario Desbloqueado - EntresHijos** ✅\n"
+            f"ID {user_id} eliminado de la blacklist."
+        )
+        context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(query.message.chat_id, msg.message_id))
+        logger.info(f"✅ Usuario ID {user_id} desbloqueado")
 
-# Función principal
+async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and context.user_data.get("awaiting_blacklist"):
+        username = update.message.text.strip()
+        if not username.startswith("@"):
+            msg = await update.message.reply_text("❌ El @name debe comenzar con @ - EntresHijos. 😕", parse_mode="Markdown")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+            return
+        try:
+            user = await context.bot.get_chat_member(update.message.chat_id, username[1:])
+            user_id = user.user.id
+            blacklist = load_blacklist()
+            if any(entry["user_id"] == user_id for entry in blacklist):
+                msg = await update.message.reply_text(f"⛔ @{escape_markdown(username[1:])} ya está en la blacklist - EntresHijos. 😕", parse_mode="Markdown")
+                context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+            else:
+                blacklist.append({"username": username[1:], "user_id": user_id})
+                save_blacklist(blacklist)
+                msg = await update.message.reply_text(
+                    f"⛔ **Usuario Añadido a Blacklist - EntresHijos** ⛔\n"
+                    f"@{escape_markdown(username[1:])} (ID: {user_id}) bloqueado.",
+                    parse_mode="Markdown"
+                )
+                context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+            del context.user_data["awaiting_blacklist"]
+            logger.info(f"⛔ @{username[1:]} (ID: {user_id}) añadido a blacklist")
+        except TelegramError as e:
+            msg = await update.message.reply_text(f"❌ Error al añadir a blacklist: {str(e)} - EntresHijos.", parse_mode="Markdown")
+            context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+            del context.user_data["awaiting_blacklist"]
+            logger.error(f"❌ Error al añadir a blacklist: {str(e)}")
+    await update.message.delete()
+
+# === FUNCIÓN PRINCIPAL ===
 def main():
     application = Application.builder().token(TOKEN).job_queue(JobQueue()).build()
-
-    # Añadir handlers
     application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("solicito", request_command))
-    application.add_handler(CommandHandler("vp", view_requests_command))
-    application.add_handler(CommandHandler("bp", delete_request_command))
+    application.add_handler(CommandHandler("solicito", solicito_command))
+    application.add_handler(CommandHandler("tickets", tickets_command))
+    application.add_handler(CommandHandler("blacklist", blacklist_command))
+    application.add_handler(CommandHandler("unblacklist", unblacklist_command))
     application.add_handler(CommandHandler("reply", reply_command))
-    application.add_handler(CommandHandler("rs", refresh_requests_command))
-    application.add_handler(CommandHandler("menu", menu_command))
-    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("pendiente", pendiente_command))
-
-    # Handlers para botones
-    application.add_handler(CallbackQueryHandler(button_start_handler, pattern="^solicito_start$|^menu_start$"))
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^view_all$|^rs_|^delete_|^priority_|^send_message_|^view_select_"))
-    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^vp_start$|^bp_start$|^reply_start$|^rs_start$|^stats_start$"))
-
-    # Añadir manejador de errores
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_handler))
     application.add_error_handler(error_handler)
-
-    # Iniciar el bot
-    logger.info("Bot iniciado exitosamente")
-    print("Bot iniciado exitosamente. Escuchando comandos...")
+    logger.info("🚀 Bot de EntresHijos iniciado exitosamente")
+    print("🚀 Bot iniciado. Escuchando comandos...")
     application.run_polling()
 
 if __name__ == "__main__":
