@@ -1,11 +1,12 @@
 import json
 import os
 import logging
+import time
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
 from telegram.helpers import escape_markdown
-from telegram.error import TelegramError
+from telegram.error import TelegramError, NetworkError
 from dotenv import load_dotenv
 import traceback
 
@@ -25,6 +26,7 @@ REQUEST_LIMIT = 2  # Límite de solicitudes por usuario cada 24 horas
 DB_FILE = "requests.json"
 BLACKLIST_FILE = "blacklist.json"
 AUTO_DELETE_TIME = 120  # 2 minutos en segundos
+PID_FILE = "bot.pid"  # Archivo para almacenar el PID del proceso
 
 # === FUNCIONES UTILITARIAS ===
 def load_requests():
@@ -81,7 +83,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return False
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
-        # Asegurar que el bot (BOT_ID) esté en la lista de admins
         bot_admin = any(admin.user.id == BOT_ID for admin in admins)
         if not bot_admin:
             logger.warning(f"⚠️ Bot ID {BOT_ID} no es administrador en {ADMIN_GROUP_ID}")
@@ -121,11 +122,34 @@ async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
 
 # === MANEJADORES DE ERRORES ===
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    error_details = f"Update {update} caused error {context.error}\n{traceback.format_exc()}"
+    error_msg = str(context.error)
+    error_details = f"Update {update} caused error {error_msg}\n{traceback.format_exc()}"
     logger.error(f"❌ {error_details}")
+
+    if "Conflict: terminated by other getUpdates request" in error_msg:
+        logger.error("❌ Conflicto detectado: otra instancia del bot está corriendo. Deteniendo esta instancia...")
+        print("❌ Error: Otra instancia del bot está corriendo. Por favor, detén todas las instancias y ejecuta solo una.")
+        os._exit(1)  # Detener el bot inmediatamente
+
     if update and update.message:
         msg = await update.message.reply_text("❌ ¡Error en EntresHijos! Intenta de nuevo o contacta a un admin. 😊")
         context.job_queue.run_once(auto_delete_message, AUTO_DELETE_TIME, data=(update.message.chat_id, msg.message_id))
+
+# === VERIFICAR INSTANCIA ÚNICA ===
+def check_single_instance():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE, "r") as f:
+            old_pid = f.read().strip()
+        try:
+            os.kill(int(old_pid), 0)  # Verificar si el proceso sigue vivo
+            logger.error(f"❌ Otra instancia del bot ya está corriendo con PID {old_pid}. Deteniendo esta instancia...")
+            print(f"❌ Error: Otra instancia del bot ya está corriendo con PID {old_pid}. Por favor, deténla antes de iniciar una nueva.")
+            os._exit(1)
+        except (OSError, ValueError):
+            logger.info(f"🗑️ PID anterior {old_pid} no está activo. Continuando...")
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    logger.info(f"✅ PID del bot registrado: {os.getpid()}")
 
 # === COMANDOS PRINCIPALES ===
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -621,6 +645,9 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === FUNCIÓN PRINCIPAL ===
 def main():
+    # Verificar instancia única
+    check_single_instance()
+
     application = Application.builder().token(TOKEN).job_queue(JobQueue()).build()
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("solicito", solicito_command))
@@ -634,7 +661,18 @@ def main():
     application.add_error_handler(error_handler)
     logger.info("🚀 Bot de EntresHijos iniciado exitosamente")
     print("🚀 Bot iniciado. Escuchando comandos...")
-    application.run_polling()
+
+    try:
+        application.run_polling()
+    except NetworkError as e:
+        logger.error(f"❌ Error de red: {str(e)}. Reintentando en 5 segundos...")
+        time.sleep(5)
+        application.run_polling()
+    finally:
+        # Eliminar el archivo PID al cerrar el bot
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+            logger.info("🗑️ Archivo PID eliminado al cerrar el bot")
 
 if __name__ == "__main__":
     main()
