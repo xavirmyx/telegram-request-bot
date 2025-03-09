@@ -1,27 +1,4 @@
 {
-    "requests": [
-        {
-            "ticket": 1,
-            "user_id": 7767930852,
-            "username": "MRS_K98",
-            "message": "enlaces deportivos.",
-            "group_id": -1002348662107,
-            "group_name": "GLOBAL SPORTS STREAM",
-            "date": "2025-03-09 06:51:40",
-            "source": "EntresHijos",
-            "priority": false
-        },
-        {
-            "ticket": 4,
-            "user_id": 7767930852,
-            "username": "MRS_K98",
-            "message": "Enlaces \ud83d\udd17",
-            "group_id": -1002348662107,
-            "group_name": "GLOBAL SPORTS STREAM",
-            "date": "2025-03-09 10:47:04",
-            "source": "EntresHijos",
-            "priority": false
-        }
-    ],
+    "requests": [],
     "last_ticket": 4
 }

@@ -1,10 +1,15 @@
 import json
 import os
+import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.helpers import escape_markdown  # Corrección de la importación
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
+
+# Configurar logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno
 load_dotenv()
@@ -59,6 +64,12 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Error al verificar administradores: {str(e)}")
         return False
+
+# Manejador de errores global
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update:
+        await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
 
 # Mensaje de bienvenida al iniciar el bot
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,7 +209,8 @@ async def enable_test_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("✅ Activar Modo Prueba", callback_data="onp_yes")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="onp_no")]
+        [InlineKeyboardButton("❌ Cancelar", callback_data="onp_no")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
@@ -217,7 +229,8 @@ async def disable_test_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("✅ Desactivar Modo Prueba", callback_data="ofp_yes")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="ofp_no")]
+        [InlineKeyboardButton("❌ Cancelar", callback_data="ofp_no")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
@@ -254,7 +267,8 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             priority_mark = "🔥 **Prioridad**" if request["priority"] else ""
             keyboard = [
                 [InlineKeyboardButton("🗑️ Eliminar", callback_data=f"delete_{ticket}_view")],
-                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"priority_{ticket}_view")]
+                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"priority_{ticket}_view")],
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
@@ -372,7 +386,8 @@ async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = [
         [InlineKeyboardButton("🔄 Refrescar Ahora", callback_data="rs_yes")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="rs_no")]
+        [InlineKeyboardButton("❌ Cancelar", callback_data="rs_no")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
@@ -461,7 +476,8 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("💾 Descargar Backup", callback_data="backup_yes")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="backup_no")]
+        [InlineKeyboardButton("❌ Cancelar", callback_data="backup_no")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
@@ -479,6 +495,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     action = query.data
+
+    # Manejar botones que no tienen un ticket
     if action == "view_all":
         data = load_requests()
         sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
@@ -502,7 +520,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "menu_start":
         await menu_command(update, context)
         return
-    elif action in ["onp_yes", "ofp_yes", "rs_yes", "backup_yes"]:
+    elif action in ["onp_yes", "onp_no", "ofp_yes", "ofp_no", "rs_yes", "rs_no", "backup_yes", "backup_no"]:
         if action == "onp_yes":
             TEST_MODE["enabled"] = True
             await query.edit_message_text(
@@ -511,6 +529,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Usa `/ofp` para volver al modo normal. 😊",
                 parse_mode="Markdown"
             )
+        elif action == "onp_no":
+            await query.edit_message_text("❌ Operación cancelada. El modo prueba no se activó. 😊", parse_mode="Markdown")
         elif action == "ofp_yes":
             TEST_MODE["enabled"] = False
             await query.edit_message_text(
@@ -519,6 +539,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "¡Todo listo para seguir! 🙌",
                 parse_mode="Markdown"
             )
+        elif action == "ofp_no":
+            await query.edit_message_text("❌ Operación cancelada. El modo normal no se restauró. 😊", parse_mode="Markdown")
         elif action == "rs_yes":
             data = load_requests()
             await query.edit_message_text(
@@ -526,6 +548,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
                 parse_mode="Markdown"
             )
+        elif action == "rs_no":
+            await query.edit_message_text("❌ Operación cancelada. No se refrescó la base de datos. 😊", parse_mode="Markdown")
         elif action == "backup_yes":
             data = load_requests()
             backup_file = "backup_requests.json"
@@ -539,18 +563,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             os.remove(backup_file)
             await query.edit_message_text("✅ **Backup enviado con éxito!** 💾", parse_mode="Markdown")
-        return
-    elif action in ["onp_no", "ofp_no", "rs_no", "backup_no"]:
-        if action == "onp_no":
-            await query.edit_message_text("❌ Operación cancelada. El modo prueba no se activó. 😊", parse_mode="Markdown")
-        elif action == "ofp_no":
-            await query.edit_message_text("❌ Operación cancelada. El modo normal no se restauró. 😊", parse_mode="Markdown")
-        elif action == "rs_no":
-            await query.edit_message_text("❌ Operación cancelada. No se refresco la base de datos. 😊", parse_mode="Markdown")
         elif action == "backup_no":
             await query.edit_message_text("❌ Operación cancelada. No se generó backup. 😊", parse_mode="Markdown")
         return
-    elif action.startswith("delete_select_"):
+
+    # Manejar botones que tienen un ticket (delete_ o priority_)
+    if action.startswith("delete_select_"):
         ticket = int(action.split("_")[2])
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
@@ -579,7 +597,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request:
             keyboard = [
                 [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"priority_{ticket}_yes")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data=f"priority_{ticket}_no")]
+                [InlineKeyboardButton("❌ Cancelar", callback_data=f"priority_{ticket}_no")],
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
@@ -594,8 +613,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
     elif action.startswith("delete_"):
-        ticket = int(action.split("_")[1])
-        status = action.split("_")[2]
+        parts = action.split("_")
+        if len(parts) < 3:
+            await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            return
+        ticket = int(parts[1])
+        status = parts[2]
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
         if request:
@@ -635,8 +658,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
     elif action.startswith("priority_"):
-        ticket = int(action.split("_")[1])
-        status = action.split("_")[2]
+        parts = action.split("_")
+        if len(parts) < 3:
+            await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            return
+        ticket = int(parts[1])
+        status = parts[2]
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
         if request:
@@ -684,8 +711,12 @@ async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await delete_request_command(update, context)
     elif action == "priority_start":
         await priority_command(update, context)
+    elif action == "rs_start":
+        await refresh_requests_command(update, context)
     elif action == "stats_start":
         await stats_command(update, context)
+    elif action == "backup_start":
+        await backup_command(update, context)
     elif action == "onp_start":
         await enable_test_mode(update, context)
     elif action == "ofp_start":
@@ -711,7 +742,10 @@ def main():
     # Handlers para botones
     application.add_handler(CallbackQueryHandler(button_start_handler, pattern="^solicito_start$|^menu_start$"))
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^view_all$|^onp_|^ofp_|^rs_|^backup_|^delete_|^priority_"))
-    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^vp_start$|^bp_start$|^priority_start$|^stats_start$|^onp_start$|^ofp_start$"))
+    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^vp_start$|^bp_start$|^priority_start$|^rs_start$|^stats_start$|^backup_start$|^onp_start$|^ofp_start$"))
+
+    # Añadir manejador de errores
+    application.add_error_handler(error_handler)
 
     # Iniciar el bot
     print("Bot iniciado exitosamente. Escuchando comandos...")
