@@ -55,14 +55,46 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = await context.bot.get_chat_administrators(chat_id)
     return any(admin.user.id == user.id for admin in admins)
 
-# Comando /solicito - Cualquier usuario (con límite según modo)
+# Mensaje de bienvenida al iniciar el bot
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_message = (
+        "🌟 **¡Bienvenido a Grupos-EntresHijos Bot!** 🌟\n"
+        "📢 Este bot está diseñado exclusivamente para gestionar solicitudes en los grupos de EntresHijos.\n"
+        "👥 **Para todos:** Usa `/solicito <mensaje>` para enviar una solicitud.\n"
+        "👑 **Solo administradores:** Usa `/menu` para ver los comandos disponibles.\n"
+        "ℹ️ ¡Estamos aquí para ayudarte! 🙌"
+    )
+    keyboard = [
+        [InlineKeyboardButton("📝 Enviar Solicitud", callback_data="solicito_start")],
+        [InlineKeyboardButton("ℹ️ Ver Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode="Markdown")
+
+# Manejar acciones de botones iniciales
+async def button_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    if action == "solicito_start":
+        await query.edit_message_text(
+            "📝 **Enviar Solicitud**\n"
+            "Por favor, usa el comando `/solicito <tu_mensaje>` para enviar tu solicitud. Ejemplo: `/solicito Necesito ayuda`. 😊"
+        )
+    elif action == "menu_start":
+        await menu_command(update, context)
+
+# Comando /solicito - Cualquier usuario (con límite según modo, sin botones)
 async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     message = " ".join(context.args)
 
     if not message:
-        await update.message.reply_text("❌ ¡Hey! Necesitas escribir un mensaje. Ejemplo: `/solicito Quiero ayuda`. 😊")
+        await update.message.reply_text(
+            "❌ ¡Hey! Necesitas escribir un mensaje. Ejemplo: `/solicito Quiero ayuda`. 😊"
+        )
         return
 
     # Verificar si el usuario es administrador
@@ -71,7 +103,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or f"Usuario_{user.id}"
 
     # Aplicar límite según el modo
-    apply_limit = TEST_MODE["enabled"] or not is_admin_flag  # Límite en modo prueba o para no admins en modo normal
+    apply_limit = TEST_MODE["enabled"] or not is_admin_flag
     if apply_limit:
         request_count, first_request_time = count_user_requests(user.id)
 
@@ -95,7 +127,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             return
         else:
-            remaining_requests = REQUEST_LIMIT - request_count - 1  # Restantes después de esta solicitud
+            remaining_requests = REQUEST_LIMIT - request_count - 1
 
     # Generar ticket
     ticket = generate_ticket()
@@ -121,7 +153,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_text = (
         f"✅ **¡Solicitud Registrada!** 🎉\n"
         f"👤 @{username}\n"
-        f"📋 **Ticket #{ticket}**\n"
+        f"🎟️ **Ticket #{ticket}**\n"
         f"📝 Mensaje: {message}\n"
         f"🏠 Grupo: {group_name}\n"
         f"🌐 Fuente: EntresHijos\n"
@@ -137,91 +169,145 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Comando /onp - Activar modo prueba (solo administradores)
+# Comando /onp - Activar modo prueba (solo administradores con botones)
 async def enable_test_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    TEST_MODE["enabled"] = True
+    keyboard = [
+        [InlineKeyboardButton("✅ Activar Modo Prueba", callback_data="onp_yes")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="onp_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🛠️ **Modo Prueba Activado** ✨\n"
-        "📢 Ahora todos, incluidos administradores, tienen un límite de 2 solicitudes diarias con `/solicito`.\n"
-        "Usa `/ofp` para volver al modo normal. 😊",
+        "🛠️ **Activar Modo Prueba** ✨\n"
+        "📢 ¿Deseas activar el modo prueba? Todos, incluidos administradores, tendrán un límite de 2 solicitudes diarias con `/solicito`. Usa `/ofp` para desactivar después. 😊\n"
+        "Confirma tu elección: 👇",
+        reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# Comando /ofp - Desactivar modo prueba (solo administradores)
+# Comando /ofp - Desactivar modo prueba (solo administradores con botones)
 async def disable_test_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    TEST_MODE["enabled"] = False
+    keyboard = [
+        [InlineKeyboardButton("✅ Desactivar Modo Prueba", callback_data="ofp_yes")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="ofp_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "✅ **Modo Normal Restaurado** 🌟\n"
-        "📢 Los administradores ahora están exentos del límite de solicitudes diarias.\n"
-        "¡Todo listo para seguir! 🙌",
+        "✅ **Desactivar Modo Prueba** 🌟\n"
+        "📢 ¿Deseas restaurar el modo normal? Los administradores quedarán exentos del límite de solicitudes diarias. 😊\n"
+        "Confirma tu elección: 👇",
+        reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# Comando /vp - Solo administradores
+# Comando /vp - Solo administradores (usando número de ticket con botones)
 async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
     data = load_requests()
     if not data["requests"]:
-        await update.message.reply_text("📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊")
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊",
+            reply_markup=reply_markup
+        )
         return
 
+    if context.args and context.args[0].isdigit():
+        ticket = int(context.args[0])
+        request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
+        if request:
+            priority_mark = "🔥 **Prioridad**" if request["priority"] else ""
+            keyboard = [
+                [InlineKeyboardButton("🗑️ Eliminar", callback_data=f"delete_{ticket}_view")],
+                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"priority_{ticket}_view")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"📋 **Solicitud - Ticket #{ticket}** {priority_mark}\n"
+                f"👤 @{request['username']}\n"
+                f"📝 Mensaje: {request['message']}\n"
+                f"🏠 Grupo: {request['group_name']}\n"
+                f"🌐 Fuente: {request['source']}\n"
+                f"🕒 Fecha: {request['date']}\n\n"
+                f"Acciones disponibles: 👇",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        else:
+            keyboard = [
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"❌ No se encontró el Ticket #{ticket}. 😕",
+                reply_markup=reply_markup
+            )
+        return
+
+    # Vista general si no se especifica ticket
     sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
-    message = (
-        "📋 **Solicitudes Pendientes - EntresHijos** 🌟\n"
-        "📅 Ordenadas de más antiguas a más recientes:\n\n"
-    )
+    message = "📋 **Solicitudes Pendientes - EntresHijos** 🌟\n📅 Ordenadas de más antiguas a más recientes:\n\n"
     for req in sorted_requests:
         priority_mark = "🔥 **Prioridad**" if req["priority"] else ""
-        message += (
-            f"🎟️ **Ticket #{req['ticket']}** {priority_mark}\n"
-            f"👤 @{req['username']}\n"
-            f"📝 **Mensaje**: {req['message']}\n"
-            f"🏠 **Grupo**: {req['group_name']}\n"
-            f"🌐 **Fuente**: {req['source']}\n"
-            f"🕒 **Fecha**: {req['date']}\n"
-            f"➖➖➖➖➖➖➖\n"
-        )
+        message += f"🎟️ Ticket #{req['ticket']} {priority_mark}\n"
+    keyboard = [
+        [InlineKeyboardButton("🔍 Ver Detalles", callback_data="view_all")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message + "\nSelecciona una acción: 👇", reply_markup=reply_markup, parse_mode="Markdown")
 
-    await update.message.reply_text(message, parse_mode="Markdown")
-
-# Comando /bp - Solo administradores (con botones)
+# Comando /bp - Solo administradores (usando número de ticket con botones)
 async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    if not context.args or not context.args[0].startswith("@"):
-        await update.message.reply_text("❌ ¡Oops! Usa: `/bp @username` para eliminar una solicitud. 😊")
+    if not context.args or not context.args[0].isdigit():
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "❌ ¡Oops! Usa: `/bp <número_de_ticket>` para eliminar una solicitud. Ejemplo: `/bp 1`. 😊",
+            reply_markup=reply_markup
+        )
         return
 
-    username = context.args[0][1:]
+    ticket = int(context.args[0])
     data = load_requests()
-    request_to_delete = None
-    for req in data["requests"]:
-        if req["username"] == username:
-            request_to_delete = req
-            break
+    request_to_delete = next((req for req in data["requests"] if req["ticket"] == ticket), None)
 
     if not request_to_delete:
-        await update.message.reply_text(f"❌ No encontramos ninguna solicitud de @{username}. ¿Seguro que existe? 🤔")
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"❌ No encontramos el Ticket #{ticket}. ¿Seguro que existe? 🤔",
+            reply_markup=reply_markup
+        )
         return
 
     keyboard = [
-        [InlineKeyboardButton("🚫 1 - NO Aceptada", callback_data=f"delete_{request_to_delete['ticket']}_not_accepted")],
-        [InlineKeyboardButton("✅ 2 - Subida", callback_data=f"delete_{request_to_delete['ticket']}_uploaded")],
+        [InlineKeyboardButton("🚫 NO Aceptada", callback_data=f"delete_{ticket}_not_accepted")],
+        [InlineKeyboardButton("✅ Subida", callback_data=f"delete_{ticket}_uploaded")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"🗑️ **Eliminar Solicitud - Ticket #{request_to_delete['ticket']}** 🛠️\n"
-        f"👤 @{username}\n"
+        f"🗑️ **Eliminar Solicitud - Ticket #{ticket}** 🛠️\n"
+        f"👤 @{request_to_delete['username']}\n"
         f"📝 Mensaje: {request_to_delete['message']}\n"
         f"🏠 Grupo: {request_to_delete['group_name']}\n"
         f"🌐 Fuente: EntresHijos\n"
@@ -237,62 +323,170 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     action = query.data
+    if action == "view_all":
+        data = load_requests()
+        sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
+        message = "📋 **Solicitudes Detalladas - EntresHijos** 🌟\n📅 Ordenadas de más antiguas a más recientes:\n\n"
+        for req in sorted_requests:
+            priority_mark = "🔥 **Prioridad**" if req["priority"] else ""
+            message += (
+                f"🎟️ **Ticket #{req['ticket']}** {priority_mark}\n"
+                f"👤 @{req['username']}\n"
+                f"📝 Mensaje: {req['message']}\n"
+                f"🏠 Grupo: {req['group_name']}\n"
+                f"🕒 Fecha: {req['date']}\n"
+                f"➖➖➖➖➖➖➖\n"
+            )
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+        return
+    elif action == "menu_start":
+        await menu_command(update, context)
+        return
+    elif action == "onp_yes":
+        TEST_MODE["enabled"] = True
+        await query.edit_message_text(
+            "🛠️ **Modo Prueba Activado** ✨\n"
+            "📢 Ahora todos, incluidos administradores, tienen un límite de 2 solicitudes diarias con `/solicito`.\n"
+            "Usa `/ofp` para volver al modo normal. 😊",
+            parse_mode="Markdown"
+        )
+        return
+    elif action == "onp_no":
+        await query.edit_message_text("❌ Operación cancelada. El modo prueba no se activó. 😊", parse_mode="Markdown")
+        return
+    elif action == "ofp_yes":
+        TEST_MODE["enabled"] = False
+        await query.edit_message_text(
+            "✅ **Modo Normal Restaurado** 🌟\n"
+            "📢 Los administradores ahora están exentos del límite de solicitudes diarias.\n"
+            "¡Todo listo para seguir! 🙌",
+            parse_mode="Markdown"
+        )
+        return
+    elif action == "ofp_no":
+        await query.edit_message_text("❌ Operación cancelada. El modo normal no se restauró. 😊", parse_mode="Markdown")
+        return
+
     ticket = int(action.split("_")[1])
     status = action.split("_")[2]
 
     data = load_requests()
-    request_to_delete = None
-    for req in data["requests"]:
-        if req["ticket"] == ticket:
-            request_to_delete = req
-            break
+    request_to_delete = next((req for req in data["requests"] if req["ticket"] == ticket), None)
 
     if not request_to_delete:
-        await query.edit_message_text("❌ ¡Ups! Esa solicitud ya no existe. 😅")
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("❌ ¡Ups! Esa solicitud ya no existe. 😅", reply_markup=reply_markup)
         return
 
-    data["requests"] = [req for req in data["requests"] if req["ticket"] != ticket]
-    save_requests(data)
+    if action.startswith("delete_"):
+        data["requests"] = [req for req in data["requests"] if req["ticket"] != ticket]
+        save_requests(data)
 
-    status_message = "🚫 Petición NO Aceptada" if status == "not_accepted" else "✅ Petición Subida"
-    await context.bot.send_message(
-        chat_id=request_to_delete["group_id"],
-        text=(
-            f"📢 **Actualización de Solicitud** 📩\n"
+        status_message = "🚫 Petición NO Aceptada" if status == "not_accepted" else "✅ Petición Subida"
+        await context.bot.send_message(
+            chat_id=request_to_delete["group_id"],
+            text=(
+                f"📢 **Actualización de Solicitud** 📩\n"
+                f"👤 @{request_to_delete['username']}\n"
+                f"🎟️ **Ticket #{ticket}**\n"
+                f"📝 Mensaje: {request_to_delete['message']}\n"
+                f"🏠 Grupo: {request_to_delete['group_name']}\n"
+                f"🌐 Fuente: EntresHijos\n"
+                f"{status_message}\n"
+                f"¡Gracias por tu paciencia! 🙌"
+            ),
+            parse_mode="Markdown"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"✅ **Solicitud Procesada** 🎉\n"
             f"👤 @{request_to_delete['username']}\n"
-            f"🎟️ **Ticket #{ticket}**\n"
+            f"🎟️ Ticket #{ticket}\n"
             f"📝 Mensaje: {request_to_delete['message']}\n"
             f"🏠 Grupo: {request_to_delete['group_name']}\n"
             f"🌐 Fuente: EntresHijos\n"
-            f"{status_message}\n"
-            f"¡Gracias por tu paciencia! 🙌"
-        ),
-        parse_mode="Markdown"
-    )
+            f"{status_message}",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    elif action.startswith("priority_"):
+        if status == "view":
+            keyboard = [
+                [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"priority_{ticket}_yes")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data=f"priority_{ticket}_no")],
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"🔍 **Marcar como Prioridad - Ticket #{ticket}** ✨\n"
+                f"👤 @{request_to_delete['username']}\n"
+                f"📝 Mensaje: {request_to_delete['message']}\n"
+                f"🏠 Grupo: {request_to_delete['group_name']}\n"
+                f"🌐 Fuente: EntresHijos\n"
+                f"🕒 Fecha: {request_to_delete['date']}\n\n"
+                f"¿Quieres marcar esta solicitud como prioritaria? 👇",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        elif status == "yes":
+            request_to_delete["priority"] = True
+            save_requests(data)
+            keyboard = [
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"✅ **Prioridad Activada** 🔥\n"
+                f"👤 @{request_to_delete['username']}\n"
+                f"🎟️ Ticket #{ticket}\n"
+                f"📝 Mensaje: {request_to_delete['message']}\n"
+                f"🏠 Grupo: {request_to_delete['group_name']}\n"
+                f"🌐 Fuente: EntresHijos\n"
+                f"¡Marcada como prioritaria con éxito! 🙌",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        else:
+            keyboard = [
+                [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "❌ Operación cancelada. La solicitud sigue sin prioridad. 😊",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
 
-    await query.edit_message_text(
-        f"✅ **Solicitud Procesada** 🎉\n"
-        f"👤 @{request_to_delete['username']}\n"
-        f"🎟️ Ticket #{ticket}\n"
-        f"📝 Mensaje: {request_to_delete['message']}\n"
-        f"🏠 Grupo: {request_to_delete['group_name']}\n"
-        f"🌐 Fuente: EntresHijos\n"
-        f"{status_message}"
-    )
-
-# Comando /rs - Solo administradores
+# Comando /rs - Solo administradores con botones
 async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    data = load_requests()
+    keyboard = [
+        [InlineKeyboardButton("🔄 Refrescar Ahora", callback_data="rs_yes")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="rs_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🔄 **¡Base de Datos Refrescada!** ✨\n"
-        "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
+        "🔄 **Refrescar Base de Datos** ✨\n"
+        "📢 ¿Deseas refrescar la base de datos de solicitudes? Esto actualizará los datos actuales. 😊\n"
+        "Confirma tu elección: 👇",
+        reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# Comando /menu - Solo administradores
+# Comando /menu - Solo administradores con botones
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
@@ -302,20 +496,31 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👤 **Para todos:**\n"
         "🔹 `/solicito <mensaje>` - Envía una solicitud (máx. 2 por día, admins exentos en modo normal).\n\n"
         "👑 **Solo administradores:**\n"
-        "🔹 `/vp` - Lista todas las solicitudes pendientes.\n"
-        "🔹 `/bp @username` - Elimina una solicitud con opciones.\n"
+        "🔹 `/vp <número_de_ticket>` - Muestra detalles de una solicitud o lista todas.\n"
+        "🔹 `/bp <número_de_ticket>` - Elimina una solicitud con opciones.\n"
         "🔹 `/rs` - Refresca la base de datos.\n"
         "🔹 `/stats` - Muestra estadísticas de solicitudes.\n"
-        "🔹 `/priority @username` - Marca una solicitud como prioritaria.\n"
+        "🔹 `/priority <número_de_ticket>` - Marca una solicitud como prioritaria.\n"
         "🔹 `/backup` - Descarga una copia de la base de datos.\n"
         "🔹 `/onp` - Activa modo prueba (límite para todos).\n"
         "🔹 `/ofp` - Desactiva modo prueba (vuelve a normal).\n"
         "🔹 `/menu` - Este menú.\n\n"
         "ℹ️ **Nota:** Solo admins pueden usar estos comandos aquí."
     )
-    await update.message.reply_text(menu_text, parse_mode="Markdown")
+    keyboard = [
+        [InlineKeyboardButton("📋 Ver Solicitudes", callback_data="vp_start")],
+        [InlineKeyboardButton("🗑️ Eliminar Solicitud", callback_data="bp_start")],
+        [InlineKeyboardButton("🔥 Priorizar Solicitud", callback_data="priority_start")],
+        [InlineKeyboardButton("🔄 Refrescar", callback_data="rs_start")],
+        [InlineKeyboardButton("📊 Estadísticas", callback_data="stats_start")],
+        [InlineKeyboardButton("💾 Backup", callback_data="backup_start")],
+        [InlineKeyboardButton("🛠️ Modo Prueba ON", callback_data="onp_start")],
+        [InlineKeyboardButton("✅ Modo Prueba OFF", callback_data="ofp_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(menu_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Comando /stats - Solo administradores
+# Comando /stats - Solo administradores con botones
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
@@ -331,111 +536,136 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_stats = "\n".join([f"🏠 {group}: {count} solicitudes" for group, count in groups.items()])
     top_users = "\n".join([f"👤 @{user}: {count} solicitudes" for user, count in sorted(users.items(), key=lambda x: x[1], reverse=True)[:3]])
 
+    keyboard = [
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         f"📊 **Estadísticas - EntresHijos** 🌟\n\n"
         f"🔢 **Total de Solicitudes**: {total_requests}\n\n"
         f"🏡 **Por Grupo**:\n{group_stats}\n\n"
         f"👥 **Usuarios Más Activos (Top 3)**:\n{top_users}\n"
         f"¡Gracias por mantener todo en marcha! 🙌",
-        parse_mode="Markdown"
-    )
-
-# Comando /priority - Solo administradores (con botones)
-async def priority_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return
-
-    if not context.args or not context.args[0].startswith("@"):
-        await update.message.reply_text("❌ ¡Hey! Usa: `/priority @username` para marcar una solicitud. 😊")
-        return
-
-    username = context.args[0][1:]
-    data = load_requests()
-    request_to_prioritize = None
-    for req in data["requests"]:
-        if req["username"] == username:
-            request_to_prioritize = req
-            break
-
-    if not request_to_prioritize:
-        await update.message.reply_text(f"❌ No hay solicitudes de @{username} para priorizar. 🤔")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("🔥 Sí, Marcar como Prioridad", callback_data=f"priority_{request_to_prioritize['ticket']}_yes")],
-        [InlineKeyboardButton("❌ No, Cancelar", callback_data=f"priority_{request_to_prioritize['ticket']}_no")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        f"🔍 **Marcar como Prioridad - Ticket #{request_to_prioritize['ticket']}** ✨\n"
-        f"👤 @{username}\n"
-        f"📝 Mensaje: {request_to_prioritize['message']}\n"
-        f"🏠 Grupo: {request_to_prioritize['group_name']}\n"
-        f"🌐 Fuente: EntresHijos\n"
-        f"🕒 Fecha: {request_to_prioritize['date']}\n\n"
-        f"¿Quieres marcar esta solicitud como prioritaria? 👇",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# Manejar botones de prioridad
-async def priority_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    action = query.data
-    ticket = int(action.split("_")[1])
-    choice = action.split("_")[2]
-
-    data = load_requests()
-    request_to_prioritize = None
-    for req in data["requests"]:
-        if req["ticket"] == ticket:
-            request_to_prioritize = req
-            break
-
-    if not request_to_prioritize:
-        await query.edit_message_text("❌ ¡Ups! Esa solicitud ya no existe. 😅")
+# Comando /priority - Solo administradores (usando número de ticket con botones)
+async def priority_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
         return
 
-    if choice == "yes":
-        request_to_prioritize["priority"] = True
-        save_requests(data)
-        await query.edit_message_text(
-            f"✅ **Prioridad Activada** 🔥\n"
-            f"👤 @{request_to_prioritize['username']}\n"
-            f"🎟️ Ticket #{ticket}\n"
-            f"📝 Mensaje: {request_to_prioritize['message']}\n"
-            f"🏠 Grupo: {request_to_prioritize['group_name']}\n"
-            f"🌐 Fuente: EntresHijos\n"
-            f"¡Marcada como prioritaria con éxito! 🙌"
+    if not context.args or not context.args[0].isdigit():
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "❌ ¡Hey! Usa: `/priority <número_de_ticket>` para marcar una solicitud. Ejemplo: `/priority 1`. 😊",
+            reply_markup=reply_markup
         )
-    else:
-        await query.edit_message_text("❌ Operación cancelada. La solicitud sigue sin prioridad. 😊")
+        return
 
-# Comando /backup - Solo administradores
+    ticket = int(context.args[0])
+    data = load_requests()
+    request_to_prioritize = next((req for req in data["requests"] if req["ticket"] == ticket), None)
+
+    if not request_to_prioritize:
+        keyboard = [
+            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"❌ No hay solicitudes con el Ticket #{ticket} para priorizar. 🤔",
+            reply_markup=reply_markup
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"priority_{ticket}_view")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🔍 **Marcar como Prioridad - Ticket #{ticket}** ✨\n"
+        f"👤 @{request_to_prioritize['username']}\n"
+        f"📝 Mensaje: {request_to_prioritize['message']}\n"
+        f"🏠 Grupo: {request_to_prioritize['group_name']}\n"
+        f"🌐 Fuente: EntresHijos\n"
+        f"🕒 Fecha: {request_to_prioritize['date']}\n\n"
+        f"Acción disponible: 👇",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+# Comando /backup - Solo administradores con botones
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    data = load_requests()
-    backup_file = "backup_requests.json"
-    with open(backup_file, "w") as f:
-        json.dump(data, f, indent=4)
-
-    await context.bot.send_document(
-        chat_id=ADMIN_GROUP_ID,
-        document=open(backup_file, "rb"),
-        caption="💾 **Copia de Seguridad - EntresHijos** ✨\nAquí tienes el respaldo de todas las solicitudes. ¡Guárdalo bien! 😊",
-        filename="backup_requests.json"
+    keyboard = [
+        [InlineKeyboardButton("💾 Descargar Backup", callback_data="backup_yes")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="backup_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "💾 **Generar Copia de Seguridad - EntresHijos** ✨\n"
+        "📢 ¿Deseas descargar una copia de la base de datos de solicitudes? 😊\n"
+        "Confirma tu elección: 👇",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
-    os.remove(backup_file)  # Eliminar archivo temporal
+
+# Manejar botones de acciones específicas
+async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    if action == "rs_yes":
+        data = load_requests()
+        await query.edit_message_text(
+            "🔄 **¡Base de Datos Refrescada!** ✨\n"
+            "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
+            parse_mode="Markdown"
+        )
+    elif action == "rs_no":
+        await query.edit_message_text("❌ Operación cancelada. No se refresco la base de datos. 😊", parse_mode="Markdown")
+    elif action == "backup_yes":
+        data = load_requests()
+        backup_file = "backup_requests.json"
+        with open(backup_file, "w") as f:
+            json.dump(data, f, indent=4)
+        await context.bot.send_document(
+            chat_id=ADMIN_GROUP_ID,
+            document=open(backup_file, "rb"),
+            caption="💾 **Copia de Seguridad - EntresHijos** ✨\nAquí tienes el respaldo de todas las solicitudes. ¡Guárdalo bien! 😊",
+            filename="backup_requests.json"
+        )
+        os.remove(backup_file)
+        await query.edit_message_text("✅ **Backup enviado con éxito!** 💾", parse_mode="Markdown")
+    elif action == "backup_no":
+        await query.edit_message_text("❌ Operación cancelada. No se generó backup. 😊", parse_mode="Markdown")
+    elif action.startswith("vp_start"):
+        await view_requests_command(update, context)
+    elif action.startswith("bp_start"):
+        await delete_request_command(update, context)
+    elif action.startswith("priority_start"):
+        await priority_command(update, context)
+    elif action.startswith("stats_start"):
+        await stats_command(update, context)
+    elif action.startswith("onp_start"):
+        await enable_test_mode(update, context)
+    elif action.startswith("ofp_start"):
+        await disable_test_mode(update, context)
 
 # Función principal
 def main():
     application = Application.builder().token(TOKEN).build()
 
+    # Añadir handlers
+    application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("solicito", request_command))
     application.add_handler(CommandHandler("onp", enable_test_mode))
     application.add_handler(CommandHandler("ofp", disable_test_mode))
@@ -447,9 +677,13 @@ def main():
     application.add_handler(CommandHandler("priority", priority_command))
     application.add_handler(CommandHandler("backup", backup_command))
 
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^delete_"))
-    application.add_handler(CallbackQueryHandler(priority_button_handler, pattern="^priority_"))
+    # Handlers para botones
+    application.add_handler(CallbackQueryHandler(button_start_handler, pattern="^solicito_start$|^menu_start$"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^delete_|^view_all$|^priority_"))
+    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^rs_|^backup_|^vp_start$|^bp_start$|^priority_start$|^stats_start$|^onp_start$|^ofp_start$"))
 
+    # Iniciar el bot
+    print("Bot iniciado exitosamente. Escuchando comandos...")
     application.run_polling()
 
 if __name__ == "__main__":
