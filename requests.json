@@ -21,7 +21,18 @@
             "date": "2025-03-09 10:04:31",
             "source": "EntresHijos",
             "priority": false
+        },
+        {
+            "ticket": 3,
+            "user_id": 952266621,
+            "username": "Nemesis26oo",
+            "message": "El se\u00f1or de los anillos. J.R.R. Tolkien.",
+            "group_id": -1002305997509,
+            "group_name": "PRUEBA",
+            "date": "2025-03-09 10:23:32",
+            "source": "EntresHijos",
+            "priority": false
         }
     ],
-    "last_ticket": 2
+    "last_ticket": 3
 }
