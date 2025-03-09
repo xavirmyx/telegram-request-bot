@@ -9,7 +9,11 @@ from telegram.error import TelegramError
 from dotenv import load_dotenv
 
 # Configurar logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    filename='bot.log',  # Guardar logs en un archivo
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno
@@ -21,11 +25,23 @@ REQUEST_LIMIT = 2  # Límite de solicitudes por usuario cada 24 horas
 # Archivo para la base de datos de solicitudes
 DB_FILE = "requests.json"
 
-# Cargar o inicializar la base de datos
+# Cargar o inicializar la base de datos con limpieza de solicitudes antiguas
 def load_requests():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        now = datetime.now()
+        cutoff_time = now - timedelta(days=30)  # Eliminar solicitudes mayores a 30 días
+        original_count = len(data["requests"])
+        data["requests"] = [
+            req for req in data["requests"]
+            if datetime.strptime(req["date"], "%Y-%m-%d %H:%M:%S") > cutoff_time
+        ]
+        deleted_count = original_count - len(data["requests"])
+        if deleted_count > 0:
+            save_requests(data)  # Guardar cambios después de eliminar
+            logger.info(f"Se eliminaron {deleted_count} solicitudes antiguas (mayores a 30 días)")
+        return data
     return {"requests": [], "last_ticket": 0}
 
 # Guardar la base de datos
@@ -55,12 +71,14 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_GROUP_ID:
         await context.bot.send_message(chat_id=chat_id, text="❌ ¡Ups! Este comando solo funciona en el grupo de administradores. 😊")
+        logger.warning(f"Intento de uso de comando admin fuera de grupo permitido por usuario {user.id}")
         return False
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
         return any(admin.user.id == user.id for admin in admins)
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Error al verificar administradores: {str(e)}")
+        logger.error(f"Error al verificar administradores: {str(e)}")
         return False
 
 # Manejador de errores global
@@ -84,6 +102,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode="Markdown")
+    logger.info(f"Usuario {update.effective_user.id} ejecutó comando /start")
 
 # Manejar acciones de botones iniciales
 async def button_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,8 +115,10 @@ async def button_start_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "📝 **Enviar Solicitud**\n"
             "Por favor, usa el comando `/solicito <tu_mensaje>` para enviar tu solicitud. Ejemplo: `/solicito Necesito ayuda`. 😊"
         )
+        logger.info(f"Usuario {update.effective_user.id} accedió a enviar solicitud desde botón")
     elif action == "menu_start":
         await menu_command(update, context)
+        logger.info(f"Usuario {update.effective_user.id} accedió al menú desde botón")
 
 # Comando /solicito - Cualquier usuario (con límite para no administradores)
 async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,6 +130,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ ¡Hey! Necesitas escribir un mensaje. Ejemplo: `/solicito Quiero ayuda`. 😊"
         )
+        logger.warning(f"Intento de solicitud sin mensaje por usuario {user.id}")
         return
 
     # Verificar si el usuario es administrador
@@ -117,6 +139,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_admin_flag = is_admin_user.status in ["administrator", "creator"]
     except TelegramError as e:
         await update.message.reply_text(f"❌ Error al verificar estado de administrador: {str(e)}")
+        logger.error(f"Error al verificar administrador en solicitud: {str(e)}")
         return
 
     username = user.username or f"Usuario_{user.id}"
@@ -137,7 +160,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⏳ Podrás hacer más en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')}).\n"
                     f"¡Paciencia! 🌟"
                 )
-
+                logger.info(f"Usuario {username} alcanzó el límite de solicitudes")
                 if request_count > REQUEST_LIMIT:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -187,7 +210,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # Notificación de "Solicitud en cola"
+    # Notificación de "Solicitud en cola" al grupo
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
@@ -203,6 +226,22 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode="Markdown"
     )
+
+    # Notificación automática a los administradores
+    await context.bot.send_message(
+        chat_id=ADMIN_GROUP_ID,
+        text=(
+            f"🔔 **Nueva Solicitud Registrada** 🔔\n"
+            f"🎟️ **Ticket #{ticket}**\n"
+            f"👤 @{escape_markdown(username)}\n"
+            f"📝 Mensaje: {escape_markdown(message)}\n"
+            f"🏠 Grupo: {escape_markdown(group_name)}\n"
+            f"🕒 Fecha: {request['date']}\n"
+            f"Usa `/vp {ticket}` para ver detalles. 📋"
+        ),
+        parse_mode="Markdown"
+    )
+    logger.info(f"Solicitud registrada - Ticket #{ticket} por @{username}")
 
 # Comando /vp - Solo administradores (usando número de ticket con botones)
 async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,6 +259,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊",
             reply_markup=reply_markup
         )
+        logger.info("No hay solicitudes pendientes")
         return
 
     if context.args and context.args[0].isdigit():
@@ -229,7 +269,8 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             priority_mark = "🔥 **Prioridad**" if request["priority"] else ""
             keyboard = [
                 [InlineKeyboardButton("🗑️ Eliminar", callback_data=f"delete_{ticket}_view")],
-                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"pri_{ticket}_view")],
+                [InlineKeyboardButton("🔥 Priorizar", callback_data=f"priority_{ticket}_view")],
+                [InlineKeyboardButton("📩 Responder", callback_data=f"reply_{ticket}_view")],
                 [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -245,6 +286,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
+            logger.info(f"Visualización de solicitud - Ticket #{ticket}")
         else:
             keyboard = [
                 [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
@@ -255,6 +297,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
                 text=f"❌ No se encontró el Ticket #{ticket}. 😕",
                 reply_markup=reply_markup
             )
+            logger.warning(f"Ticket #{ticket} no encontrado")
         return
 
     # Vista general si no se especifica ticket
@@ -274,6 +317,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    logger.info("Vista general de solicitudes mostrada")
 
 # Comando /bp - Solo administradores (lista de tickets con botones)
 async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,6 +335,7 @@ async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_T
             text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊",
             reply_markup=reply_markup
         )
+        logger.info("No hay solicitudes para eliminar")
         return
 
     # Mostrar lista de tickets para seleccionar
@@ -307,118 +352,47 @@ async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    logger.info("Lista de solicitudes para eliminar mostrada")
 
-# Comando /pri - Solo administradores (lista detallada de tickets con botones para priorizar)
-async def pri_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Comando /reply - Solo administradores (responder a una solicitud)
+async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
 
-    data = load_requests()
-    if not data["requests"]:
-        keyboard = [
-            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊",
-            reply_markup=reply_markup
-        )
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("❌ Uso: `/reply <ticket> <mensaje>`", parse_mode="Markdown")
+        logger.warning("Uso incorrecto del comando /reply")
         return
-
-    # Mostrar lista detallada de tickets
-    sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
-    message = "🔥 **Priorizar Solicitudes - EntresHijos** 🌟\n📅 Ordenadas de más antiguas a más recientes:\n\n"
-    for req in sorted_requests:
-        priority_mark = "🔥 **Prioridad**" if req["priority"] else ""
-        message += (
-            f"🎟️ **Ticket #{req['ticket']}** {priority_mark}\n"
-            f"👤 @{escape_markdown(req['username'])}\n"
-            f"📝 Mensaje: {escape_markdown(req['message'])}\n"
-            f"🏠 Grupo: {escape_markdown(req['group_name'])}\n"
-            f"🌐 Fuente: {req['source']}\n"
-            f"🕒 Fecha: {req['date']}\n"
-            f"➖➖➖➖➖➖➖\n"
-        )
-        # Botón para priorizar cada ticket
-        keyboard = [[InlineKeyboardButton(f"🔥 Priorizar Ticket #{req['ticket']}", callback_data=f"pri_select_{req['ticket']}")]]
-        keyboard.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=message,
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-
-# Comando /add - Solo administradores (añadir administrador al grupo)
-async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return
-
-    if not context.args or len(context.args) != 1:
-        await update.message.reply_text(
-            "❌ Uso incorrecto. Usa: `/add @username` para añadir un administrador. 😊",
-            parse_mode="Markdown"
-        )
-        return
-
-    username = context.args[0]
-    if not username.startswith("@"):
-        await update.message.reply_text(
-            "❌ Por favor, proporciona un nombre de usuario válido con @. Ejemplo: `/add @username`. 😊",
-            parse_mode="Markdown"
-        )
-        return
-
-    username = username[1:]  # Quitar el @
 
     try:
-        # Buscar al usuario en el chat para obtener su ID
-        chat_members = await context.bot.get_chat_administrators(ADMIN_GROUP_ID)
-        user_id = None
-        for member in chat_members:
-            if member.user.username == username:
-                user_id = member.user.id
-                break
+        ticket = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ El número de ticket debe ser un valor numérico. Ejemplo: `/reply 1 Hola`")
+        logger.warning("Número de ticket inválido en comando /reply")
+        return
 
-        if not user_id:
-            # Si no está en los administradores, intentar buscarlo en el chat
-            chat = await context.bot.get_chat(ADMIN_GROUP_ID)
-            async for member in chat.get_members():
-                if member.user.username == username:
-                    user_id = member.user.id
-                    break
+    reply_message = " ".join(context.args[1:])
 
-        if not user_id:
-            await update.message.reply_text(
-                f"❌ No se encontró al usuario @{escape_markdown(username)} en el grupo. Asegúrate de que esté presente. 😊",
+    data = load_requests()
+    request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
+    if request:
+        try:
+            await context.bot.send_message(
+                chat_id=request["group_id"],
+                text=f"📩 **Respuesta a tu Solicitud** 📩\n"
+                     f"🎟️ Ticket #{ticket}\n"
+                     f"👤 @{escape_markdown(request['username'])}\n"
+                     f"📝 Respuesta: {escape_markdown(reply_message)}",
                 parse_mode="Markdown"
             )
-            return
-
-        # Promover al usuario a administrador
-        await context.bot.promote_chat_member(
-            chat_id=ADMIN_GROUP_ID,
-            user_id=user_id,
-            can_change_info=True,
-            can_delete_messages=True,
-            can_invite_users=True,
-            can_restrict_members=True,
-            can_pin_messages=True,
-            can_promote_members=False
-        )
-
-        await update.message.reply_text(
-            f"✅ ¡Éxito! @{escape_markdown(username)} ha sido promovido a administrador. 🙌",
-            parse_mode="Markdown"
-        )
-
-    except TelegramError as e:
-        await update.message.reply_text(
-            f"❌ Error al añadir administrador: {str(e)}. Asegúrate de que el bot tenga permisos para promover miembros. 😊",
-            parse_mode="Markdown"
-        )
+            await update.message.reply_text(f"✅ Respuesta enviada para Ticket #{ticket}", parse_mode="Markdown")
+            logger.info(f"Respuesta enviada para Ticket #{ticket}: {reply_message}")
+        except TelegramError as e:
+            await update.message.reply_text(f"❌ Error al enviar la respuesta: {str(e)}")
+            logger.error(f"Error al enviar respuesta para Ticket #{ticket}: {str(e)}")
+    else:
+        await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado", parse_mode="Markdown")
+        logger.warning(f"Ticket #{ticket} no encontrado para responder")
 
 # Comando /rs - Solo administradores con botones
 async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -439,6 +413,75 @@ async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    logger.info("Comando /rs ejecutado, esperando confirmación")
+
+# Comando /clear - Solo administradores (limpiar solicitudes)
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return
+
+    data = load_requests()
+    if not data["requests"]:
+        await update.message.reply_text("📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊")
+        logger.info("No hay solicitudes para limpiar")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Limpiar Todas", callback_data="clear_all")],
+        [InlineKeyboardButton("🚫 Limpiar No Prioritarias", callback_data="clear_non_priority")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="clear_cancel")],
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🗑️ **Limpiar Solicitudes** ⚠️\n"
+        "📢 ¿Qué deseas hacer?\n"
+        "- *Limpiar Todas*: Elimina todas las solicitudes.\n"
+        "- *Limpiar No Prioritarias*: Elimina solo las solicitudes sin prioridad.\n"
+        "Confirma tu elección: 👇",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    logger.info("Comando /clear ejecutado, esperando confirmación")
+
+# Comando /graph - Solo administradores (estadísticas en tiempo real)
+async def graph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return
+
+    data = load_requests()
+    if not data["requests"]:
+        await update.message.reply_text("📪 **¡Todo limpio!** No hay solicitudes para mostrar estadísticas. 😊")
+        logger.info("No hay solicitudes para generar estadísticas")
+        return
+
+    # Contar solicitudes por día
+    requests_by_day = {}
+    for req in data["requests"]:
+        req_date = datetime.strptime(req["date"], "%Y-%m-%d %H:%M:%S").date()
+        requests_by_day[req_date] = requests_by_day.get(req_date, 0) + 1
+
+    # Contar solicitudes por usuario
+    users = {}
+    for req in data["requests"]:
+        users[req["username"]] = users.get(req["username"], 0) + 1
+
+    # Formatear estadísticas
+    stats_text = "📊 **Estadísticas en Tiempo Real - EntresHijos** 🌟\n\n"
+    stats_text += "🔢 **Solicitudes por Día**:\n"
+    for day, count in sorted(requests_by_day.items()):
+        stats_text += f"📅 {day}: {count} solicitud(es)\n"
+    stats_text += "\n👥 **Solicitudes por Usuario** (Top 5):\n"
+    for username, count in sorted(users.items(), key=lambda x: x[1], reverse=True)[:5]:
+        stats_text += f"👤 @{escape_markdown(username)}: {count} solicitud(es)\n"
+    stats_text += "\nℹ️ Nota: Usa `/stats` para estadísticas detalladas."
+
+    keyboard = [
+        [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+    logger.info("Estadísticas en tiempo real mostradas")
 
 # Comando /menu - Solo administradores con botones
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,20 +495,22 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👑 **Solo administradores:**\n"
         "🔹 `/vp <número_de_ticket>` - Muestra detalles de una solicitud o lista todas.\n"
         "🔹 `/bp` - Elimina una solicitud seleccionando un ticket.\n"
+        "🔹 `/reply <ticket> <mensaje>` - Responde a una solicitud específica.\n"
         "🔹 `/rs` - Refresca la base de datos.\n"
         "🔹 `/stats` - Muestra estadísticas de solicitudes.\n"
-        "🔹 `/pri` - Marca una solicitud como prioritaria.\n"
-        "🔹 `/add @username` - Añade un administrador al grupo.\n"
+        "🔹 `/clear` - Limpia todas las solicitudes o solo las no prioritarias.\n"
+        "🔹 `/graph` - Muestra estadísticas en tiempo real.\n"
         "🔹 `/menu` - Este menú.\n\n"
         "ℹ️ **Nota:** Solo admins pueden usar estos comandos aquí."
     )
     keyboard = [
         [InlineKeyboardButton("📋 Ver Solicitudes", callback_data="vp_start")],
         [InlineKeyboardButton("🗑️ Eliminar Solicitud", callback_data="bp_start")],
-        [InlineKeyboardButton("🔥 Priorizar Solicitud", callback_data="pri_start")],
+        [InlineKeyboardButton("📩 Responder Solicitud", callback_data="reply_start")],
         [InlineKeyboardButton("🔄 Refrescar", callback_data="rs_start")],
         [InlineKeyboardButton("📊 Estadísticas", callback_data="stats_start")],
-        [InlineKeyboardButton("👑 Añadir Admin", callback_data="add_start")]
+        [InlineKeyboardButton("🗑️ Limpiar Solicitudes", callback_data="clear_start")],
+        [InlineKeyboardButton("📈 Estadísticas en Tiempo Real", callback_data="graph_start")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
@@ -474,6 +519,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    logger.info("Menú mostrado al usuario")
 
 # Comando /stats - Solo administradores con botones
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,6 +551,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    logger.info("Estadísticas mostradas")
 
 # Manejar las acciones de los botones
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -533,23 +580,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+        logger.info("Vista detallada de solicitudes mostrada")
         return
     elif action == "menu_start":
         await menu_command(update, context)
+        logger.info("Regreso al menú desde botón")
         return
     elif action in ["rs_yes", "rs_no"]:
         if action == "rs_yes":
-            data = load_requests()
+            data = load_requests()  # Recargar la base de datos
             await query.edit_message_text(
                 "🔄 **¡Base de Datos Refrescada!** ✨\n"
                 "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
                 parse_mode="Markdown"
             )
+            logger.info("Base de datos refrescada")
         elif action == "rs_no":
             await query.edit_message_text("❌ Operación cancelada. No se refrescó la base de datos. 😊", parse_mode="Markdown")
+            logger.info("Refresco de base de datos cancelado")
+        return
+    elif action in ["clear_all", "clear_non_priority", "clear_cancel"]:
+        data = load_requests()
+        if action == "clear_all":
+            original_count = len(data["requests"])
+            data["requests"] = []
+            save_requests(data)
+            await query.edit_message_text(
+                f"🗑️ **¡Limpieza Completa!** ✅\nSe eliminaron {original_count} solicitudes.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Se eliminaron {original_count} solicitudes con /clear")
+        elif action == "clear_non_priority":
+            original_count = len(data["requests"])
+            data["requests"] = [req for req in data["requests"] if req["priority"]]
+            saved_count = len(data["requests"])
+            deleted_count = original_count - saved_count
+            save_requests(data)
+            await query.edit_message_text(
+                f"🚫 **¡Limpieza de No Prioritarias!** ✅\nSe eliminaron {deleted_count} solicitudes no prioritarias.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Se eliminaron {deleted_count} solicitudes no prioritarias con /clear")
+        else:  # clear_cancel
+            await query.edit_message_text("❌ Operación de limpieza cancelada. 😊", parse_mode="Markdown")
+            logger.info("Limpieza cancelada")
         return
 
-    # Manejar botones que tienen un ticket (delete_ o pri_)
+    # Manejar botones que tienen un ticket (delete_, priority_, reply_)
     if action.startswith("delete_select_"):
         ticket = int(action.split("_")[2])
         data = load_requests()
@@ -572,14 +649,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
-    elif action.startswith("pri_select_"):
+            logger.info(f"Selección para eliminar Ticket #{ticket}")
+    elif action.startswith("priority_select_"):
         ticket = int(action.split("_")[2])
         data = load_requests()
         request = next((req for req in data["requests"] if req["ticket"] == ticket), None)
         if request:
             keyboard = [
-                [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"pri_{ticket}_yes")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data=f"pri_{ticket}_no")],
+                [InlineKeyboardButton("🔥 Marcar como Prioridad", callback_data=f"priority_{ticket}_yes")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data=f"priority_{ticket}_no")],
                 [InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_start")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -594,10 +672,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
+            logger.info(f"Selección para priorizar Ticket #{ticket}")
+    elif action.startswith("reply_"):
+        ticket = int(action.split("_")[1])
+        await query.edit_message_text(
+            f"📩 **Responder a Solicitud - Ticket #{ticket}** 📩\n"
+            "Por favor, usa el comando `/reply {ticket} <mensaje>` para enviar una respuesta. Ejemplo: `/reply {ticket} Hola, tu solicitud fue procesada.` 😊",
+            parse_mode="Markdown"
+        )
+        logger.info(f"Botón de respuesta para Ticket #{ticket} activado")
     elif action.startswith("delete_"):
         parts = action.split("_")
         if len(parts) < 3:
             await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            logger.error("Formato de acción delete_ inválido")
             return
         ticket = int(parts[1])
         status = parts[2]
@@ -639,10 +727,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📋 Estado: {status_message}",
                 parse_mode="Markdown"
             )
-    elif action.startswith("pri_"):
+            logger.info(f"Solicitud eliminada - Ticket #{ticket}, Estado: {status_message}")
+    elif action.startswith("priority_"):
         parts = action.split("_")
         if len(parts) < 3:
             await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            logger.error("Formato de acción priority_ inválido")
             return
         ticket = int(parts[1])
         status = parts[2]
@@ -678,8 +768,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"¡Marcada como prioritaria con éxito! 🙌",
                     parse_mode="Markdown"
                 )
+                logger.info(f"Prioridad activada para Ticket #{ticket}")
             else:
                 await query.edit_message_text("❌ Operación cancelada. La solicitud sigue sin prioridad. 😊", parse_mode="Markdown")
+                logger.info(f"Priorización cancelada para Ticket #{ticket}")
 
 # Manejar botones de acciones específicas
 async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -689,19 +781,29 @@ async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
     action = query.data
     if action == "vp_start":
         await view_requests_command(update, context)
+        logger.info("Botón Ver Solicitudes activado")
     elif action == "bp_start":
         await delete_request_command(update, context)
-    elif action == "pri_start":
-        await pri_command(update, context)
+        logger.info("Botón Eliminar Solicitud activado")
+    elif action == "reply_start":
+        await query.edit_message_text(
+            "📩 **Responder a una Solicitud**\n"
+            "Por favor, usa el comando `/reply <ticket> <mensaje>` para enviar una respuesta. Ejemplo: `/reply 1 Hola, tu solicitud fue procesada.` 😊",
+            parse_mode="Markdown"
+        )
+        logger.info("Botón Responder Solicitud activado")
     elif action == "rs_start":
         await refresh_requests_command(update, context)
+        logger.info("Botón Refrescar activado")
     elif action == "stats_start":
         await stats_command(update, context)
-    elif action == "add_start":
-        await query.edit_message_text(
-            "👑 **Añadir Administrador**\n"
-            "Por favor, usa el comando `/add @username` para añadir un administrador. Ejemplo: `/add @username`. 😊"
-        )
+        logger.info("Botón Estadísticas activado")
+    elif action == "clear_start":
+        await clear_command(update, context)
+        logger.info("Botón Limpiar Solicitudes activado")
+    elif action == "graph_start":
+        await graph_command(update, context)
+        logger.info("Botón Estadísticas en Tiempo Real activado")
 
 # Función principal
 def main():
@@ -712,21 +814,23 @@ def main():
     application.add_handler(CommandHandler("solicito", request_command))
     application.add_handler(CommandHandler("vp", view_requests_command))
     application.add_handler(CommandHandler("bp", delete_request_command))
+    application.add_handler(CommandHandler("reply", reply_command))
     application.add_handler(CommandHandler("rs", refresh_requests_command))
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("pri", pri_command))
-    application.add_handler(CommandHandler("add", add_admin_command))
+    application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CommandHandler("graph", graph_command))
 
     # Handlers para botones
     application.add_handler(CallbackQueryHandler(button_start_handler, pattern="^solicito_start$|^menu_start$"))
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^view_all$|^rs_|^delete_|^pri_"))
-    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^vp_start$|^bp_start$|^pri_start$|^rs_start$|^stats_start$|^add_start$"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^view_all$|^rs_|^delete_|^priority_|^reply_|^clear_"))
+    application.add_handler(CallbackQueryHandler(action_button_handler, pattern="^vp_start$|^bp_start$|^reply_start$|^rs_start$|^stats_start$|^clear_start$|^graph_start$"))
 
     # Añadir manejador de errores
     application.add_error_handler(error_handler)
 
     # Iniciar el bot
+    logger.info("Bot iniciado exitosamente")
     print("Bot iniciado exitosamente. Escuchando comandos...")
     application.run_polling()
 
