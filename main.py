@@ -88,15 +88,21 @@ async def clean_admin_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
         # Usar getUpdates para obtener mensajes recientes (alternativa a get_chat_history)
         updates = await context.bot.get_updates(offset=-1, limit=50)
         for update in updates:
-            if update.message and update.message.chat_id == chat_id and update.message.message_id != current_message_id:
-                if update.message.from_user and update.message.from_user.is_bot:
-                    admin_commands = ["/vp", "/bp", "/reply", "/rs", "/stats", "/pendiente"]
-                    if any(cmd in update.message.text for cmd in admin_commands) or "Acciones disponibles" in update.message.text or "Solicitud - Ticket" in update.message.text:
-                        try:
-                            await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-                            logger.info(f"Mensaje eliminado (ID: {update.message.message_id}) para mantener el grupo limpio")
-                        except TelegramError as e:
-                            logger.warning(f"No se pudo eliminar mensaje (ID: {update.message.message_id}): {str(e)}")
+            if (update.message and update.message.chat_id == chat_id and
+                update.message.message_id != current_message_id and
+                update.message.from_user and update.message.from_user.is_bot):
+                admin_commands = ["/vp", "/bp", "/reply", "/rs", "/stats", "/pendiente", "/menu"]
+                if (any(cmd in update.message.text for cmd in admin_commands) or
+                    "Acciones disponibles" in update.message.text or
+                    "Solicitud - Ticket" in update.message.text or
+                    "Respuesta Enviada" in update.message.text or
+                    "Refrescada" in update.message.text or
+                    "Estadísticas" in update.message.text):
+                    try:
+                        await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+                        logger.info(f"Mensaje eliminado (ID: {update.message.message_id}) para mantener el grupo limpio")
+                    except TelegramError as e:
+                        logger.warning(f"No se pudo eliminar mensaje (ID: {update.message.message_id}): {str(e)}")
     except Exception as e:
         logger.error(f"Error al limpiar mensajes: {str(e)}")
 
@@ -118,7 +124,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(error_details)
     if update and update.message:
         try:
-            await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
+            msg = await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
+            context.job_queue.run_once(auto_delete_message, 120, data=(update.message.chat_id, msg.message_id))
         except TelegramError as e:
             logger.error(f"Error al enviar mensaje de error: {str(e)}")
 
@@ -137,6 +144,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     msg = await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode="Markdown")
+    context.job_queue.run_once(auto_delete_message, 120, data=(update.message.chat_id, msg.message_id))
     logger.info(f"Usuario {update.effective_user.id} ejecutó comando /start")
 
 # Manejar acciones de botones iniciales
@@ -146,10 +154,11 @@ async def button_start_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     action = query.data
     if action == "solicito_start":
-        await query.edit_message_text(
+        msg = await query.edit_message_text(
             "📝 **Enviar Solicitud**\n"
             "Por favor, usa el comando `/solicito <tu_mensaje>` para enviar tu solicitud. Ejemplo: `/solicito Necesito ayuda`. 😊"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
         logger.info(f"Usuario {update.effective_user.id} accedió a enviar solicitud desde botón")
     elif action == "menu_start":
         await menu_command(update, context)
@@ -162,9 +171,10 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = " ".join(context.args)
 
     if not message:
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             "❌ ¡Hey! Necesitas escribir un mensaje. Ejemplo: `/solicito Quiero ayuda`. 😊"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
         logger.warning(f"Intento de solicitud sin mensaje por usuario {user.id}")
         return
 
@@ -172,7 +182,8 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_admin_user = await context.bot.get_chat_member(ADMIN_GROUP_ID, user.id)
         is_admin_flag = is_admin_user.status in ["administrator", "creator"]
     except TelegramError as e:
-        await update.message.reply_text(f"❌ Error al verificar estado de administrador: {str(e)}")
+        msg = await update.message.reply_text(f"❌ Error al verificar estado de administrador: {str(e)}")
+        context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
         logger.error(f"Error al verificar administrador en solicitud: {str(e)}")
         return
 
@@ -186,11 +197,12 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 time_left = reset_time - datetime.now()
                 hours_left = int(time_left.total_seconds() // 3600)
                 minutes_left = int((time_left.total_seconds() % 3600) // 60)
-                await update.message.reply_text(
+                msg = await update.message.reply_text(
                     f"⛔ ¡Lo siento, @{escape_markdown(username)}! Has agotado tus {REQUEST_LIMIT} solicitudes diarias. 😔\n"
                     f"⏳ Podrás hacer más en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')}).\n"
                     f"¡Paciencia! 🌟"
                 )
+                context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
                 logger.info(f"Usuario {username} alcanzó el límite de solicitudes")
                 if request_count > REQUEST_LIMIT:
                     await context.bot.send_message(
@@ -256,7 +268,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    await context.bot.send_message(
+    admin_msg = await context.bot.send_message(
         chat_id=ADMIN_GROUP_ID,
         text=(
             f"🔔 **Nueva Solicitud Registrada** 🔔\n"
@@ -269,6 +281,7 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(ADMIN_GROUP_ID, admin_msg.message_id))
     logger.info(f"Solicitud registrada - Ticket #{ticket} por @{username}")
 
 # Comando /vp - Solo administradores (usando número de ticket con botones)
@@ -282,6 +295,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=update.effective_chat.id,
             text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.info("No hay solicitudes pendientes")
         return
@@ -311,6 +325,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
             await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
             logger.info(f"Visualización de solicitud - Ticket #{ticket}")
         else:
@@ -318,6 +333,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
                 chat_id=update.effective_chat.id,
                 text=f"❌ No se encontró el Ticket #{ticket}. 😕"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
             await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
             logger.warning(f"Ticket #{ticket} no encontrado")
         return
@@ -336,6 +352,7 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.info("Lista de solicitudes mostrada")
 
@@ -350,6 +367,7 @@ async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_T
             chat_id=update.effective_chat.id,
             text="📪 **¡Todo limpio!** No hay solicitudes pendientes por ahora. 😊"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.info("No hay solicitudes para eliminar")
         return
@@ -368,6 +386,7 @@ async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
     logger.info("Lista de solicitudes para eliminar mostrada")
 
@@ -378,6 +397,7 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args or len(context.args) < 2:
         msg = await update.message.reply_text("❌ Uso: `/reply <ticket> <mensaje>`", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.warning("Uso incorrecto del comando /reply")
         return
@@ -386,6 +406,7 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ticket = int(context.args[0])
     except ValueError:
         msg = await update.message.reply_text("❌ El número de ticket debe ser un valor numérico. Ejemplo: `/reply 1 Hola`")
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.warning("Número de ticket inválido en comando /reply")
         return
@@ -418,14 +439,17 @@ async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=admin_response,
                 parse_mode="Markdown"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
             await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
             logger.info(f"Respuesta enviada para Ticket #{ticket}: {reply_message}")
         except TelegramError as e:
             msg = await update.message.reply_text(f"❌ Error al enviar la respuesta: {str(e)}")
+            context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
             await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
             logger.error(f"Error al enviar respuesta para Ticket #{ticket}: {str(e)}")
     else:
         msg = await update.message.reply_text(f"❌ Ticket #{ticket} no encontrado", parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
         await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
         logger.warning(f"Ticket #{ticket} no encontrado para responder")
 
@@ -448,6 +472,7 @@ async def refresh_requests_command(update: Update, context: ContextTypes.DEFAULT
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
     logger.info("Comando /rs ejecutado, esperando confirmación")
 
@@ -484,6 +509,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
     logger.info("Menú mostrado al usuario")
 
@@ -512,6 +538,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
              f"¡Gracias por mantener todo en marcha! 🙌",
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(update.effective_chat.id, msg.message_id))
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
     logger.info("Estadísticas mostradas")
 
@@ -577,6 +604,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         msg = await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
         await clean_admin_messages(context, query.message.chat_id, msg.message_id)
         logger.info("Vista detallada de solicitudes mostrada")
         return
@@ -592,10 +620,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "✅ Todo está actualizado. Usa `/vp` para ver las solicitudes. 😊",
                 parse_mode="Markdown"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.info("Base de datos refrescada")
         elif action == "rs_no":
             msg = await query.edit_message_text("❌ Operación cancelada. No se refrescó la base de datos. 😊", parse_mode="Markdown")
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.info("Refresco de base de datos cancelado")
         return
@@ -627,6 +657,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.info(f"Selección para eliminar Ticket #{ticket}")
     elif action.startswith("priority_select_"):
@@ -651,6 +682,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.info(f"Selección para priorizar Ticket #{ticket}")
     elif action.startswith("send_message_"):
@@ -660,12 +692,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Por favor, usa el comando `/reply {ticket} <mensaje>` para enviar un mensaje al usuario. Ejemplo: `/reply {ticket} Hola, tu solicitud fue procesada.` 😊",
             parse_mode="Markdown"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
         await clean_admin_messages(context, query.message.chat_id, msg.message_id)
         logger.info(f"Botón de enviar mensaje para Ticket #{ticket} activado")
     elif action.startswith("delete_"):
         parts = action.split("_")
         if len(parts) < 3:
             msg = await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.error("Formato de acción delete_ inválido")
             return
@@ -725,6 +759,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🕒 Fecha: {request['date']}",
                     parse_mode="Markdown"
                 )
+                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
                 await clean_admin_messages(context, query.message.chat_id, msg.message_id)
 
             logger.info(f"Solicitud procesada - Ticket #{ticket}, Estado: {status_message}")
@@ -732,6 +767,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = action.split("_")
         if len(parts) < 3:
             msg = await query.edit_message_text("❌ Error: Acción no válida. Por favor, intenta de nuevo. 😊")
+            context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
             await clean_admin_messages(context, query.message.chat_id, msg.message_id)
             logger.error("Formato de acción priority_ inválido")
             return
@@ -770,10 +806,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"¡Marcada como prioritaria con éxito! 🙌",
                     parse_mode="Markdown"
                 )
+                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
                 await clean_admin_messages(context, query.message.chat_id, msg.message_id)
                 logger.info(f"Prioridad activada para Ticket #{ticket}")
             else:
                 msg = await query.edit_message_text("❌ Operación cancelada. La solicitud sigue sin prioridad. 😊", parse_mode="Markdown")
+                context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
                 await clean_admin_messages(context, query.message.chat_id, msg.message_id)
                 logger.info(f"Priorización cancelada para Ticket #{ticket}")
 
@@ -790,11 +828,12 @@ async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await delete_request_command(update, context)
         logger.info("Botón Eliminar Solicitud activado")
     elif action == "reply_start":
-        await query.edit_message_text(
+        msg = await query.edit_message_text(
             "📩 **Responder a una Solicitud**\n"
             "Por favor, usa el comando `/reply <ticket> <mensaje>` para enviar una respuesta. Ejemplo: `/reply 1 Hola, tu solicitud fue procesada.` 😊",
             parse_mode="Markdown"
         )
+        context.job_queue.run_once(auto_delete_message, 120, data=(query.message.chat_id, msg.message_id))
         logger.info("Botón Responder Solicitud activado")
     elif action == "rs_start":
         await refresh_requests_command(update, context)
