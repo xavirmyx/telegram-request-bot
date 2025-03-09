@@ -9,9 +9,9 @@ from telegram.error import TelegramError
 from dotenv import load_dotenv
 import traceback
 
-# Configurar logging con detalles de errores
+# Configurar logging con detalles de errores y confirmaciones
 logging.basicConfig(
-    filename='bot.log',  # Guardar logs en un archivo
+    filename='bot.log',
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
@@ -32,7 +32,7 @@ def load_requests():
         with open(DB_FILE, "r") as f:
             data = json.load(f)
         now = datetime.now()
-        cutoff_time = now - timedelta(days=30)  # Eliminar solicitudes mayores a 30 días
+        cutoff_time = now - timedelta(days=30)
         original_count = len(data["requests"])
         data["requests"] = [
             req for req in data["requests"]
@@ -40,7 +40,7 @@ def load_requests():
         ]
         deleted_count = original_count - len(data["requests"])
         if deleted_count > 0:
-            save_requests(data)  # Guardar cambios después de eliminar
+            save_requests(data)
             logger.info(f"Se eliminaron {deleted_count} solicitudes antiguas (mayores a 30 días)")
         return data
     return {"requests": [], "last_ticket": 0}
@@ -82,30 +82,32 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error al verificar administradores: {str(e)}")
         return False
 
-# Eliminar mensajes anteriores de comandos de administrador
+# Eliminar mensajes anteriores de comandos de administrador (usando un enfoque alternativo)
 async def clean_admin_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int, current_message_id: int):
     try:
-        async for message in context.bot.get_chat_history(chat_id=chat_id, limit=50):
-            if message.message_id != current_message_id and message.from_user and message.from_user.is_bot:
-                # Identificar mensajes de comandos de administrador por contenido o comando
-                admin_commands = ["/vp", "/bp", "/reply", "/rs", "/stats", "/infosolic"]
-                if any(cmd in message.text for cmd in admin_commands) or "Acciones disponibles" in message.text or "Solicitud - Ticket" in message.text:
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
-                        logger.info(f"Mensaje eliminado (ID: {message.message_id}) para mantener el grupo limpio")
-                    except TelegramError as e:
-                        logger.warning(f"No se pudo eliminar mensaje (ID: {message.message_id}): {str(e)}")
+        # Usar getUpdates para obtener mensajes recientes (alternativa a get_chat_history)
+        updates = await context.bot.get_updates(offset=-1, limit=50)
+        for update in updates:
+            if update.message and update.message.chat_id == chat_id and update.message.message_id != current_message_id:
+                if update.message.from_user and update.message.from_user.is_bot:
+                    admin_commands = ["/vp", "/bp", "/reply", "/rs", "/stats", "/pendiente"]
+                    if any(cmd in update.message.text for cmd in admin_commands) or "Acciones disponibles" in update.message.text or "Solicitud - Ticket" in update.message.text:
+                        try:
+                            await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+                            logger.info(f"Mensaje eliminado (ID: {update.message.message_id}) para mantener el grupo limpio")
+                        except TelegramError as e:
+                            logger.warning(f"No se pudo eliminar mensaje (ID: {update.message.message_id}): {str(e)}")
     except Exception as e:
         logger.error(f"Error al limpiar mensajes: {str(e)}")
 
 # Autoeliminar mensaje después de 2 minutos
-def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
+async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
     """Callback para eliminar un mensaje después de 2 minutos."""
     job = context.job
     if job.context:
         try:
             chat_id, message_id = job.context
-            context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
             logger.info(f"Mensaje autoeliminado (Chat ID: {chat_id}, Message ID: {message_id})")
         except TelegramError as e:
             logger.warning(f"No se pudo autoeliminar mensaje (Chat ID: {chat_id}, Message ID: {message_id}): {str(e)}")
@@ -115,7 +117,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     error_details = f"Update {update} caused error {context.error}\n{traceback.format_exc()}"
     logger.error(error_details)
     if update and update.message:
-        await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
+        try:
+            await update.message.reply_text("❌ ¡Ups! Ocurrió un error. Por favor, intenta de nuevo o contacta a un administrador. 😊")
+        except TelegramError as e:
+            logger.error(f"Error al enviar mensaje de error: {str(e)}")
 
 # Mensaje de bienvenida al iniciar el bot
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +168,6 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Intento de solicitud sin mensaje por usuario {user.id}")
         return
 
-    # Verificar si el usuario es administrador
     try:
         is_admin_user = await context.bot.get_chat_member(ADMIN_GROUP_ID, user.id)
         is_admin_flag = is_admin_user.status in ["administrator", "creator"]
@@ -174,17 +178,14 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     username = user.username or f"Usuario_{user.id}"
 
-    # Aplicar límite solo a no administradores
     if not is_admin_flag:
         request_count, first_request_time = count_user_requests(user.id)
-
         if request_count >= REQUEST_LIMIT:
             if first_request_time:
                 reset_time = first_request_time + timedelta(hours=24)
                 time_left = reset_time - datetime.now()
                 hours_left = int(time_left.total_seconds() // 3600)
                 minutes_left = int((time_left.total_seconds() % 3600) // 60)
-
                 await update.message.reply_text(
                     f"⛔ ¡Lo siento, @{escape_markdown(username)}! Has agotado tus {REQUEST_LIMIT} solicitudes diarias. 😔\n"
                     f"⏳ Podrás hacer más en {hours_left}h {minutes_left}m (a las {reset_time.strftime('%H:%M:%S')}).\n"
@@ -200,11 +201,9 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             remaining_requests = REQUEST_LIMIT - request_count - 1
 
-    # Generar ticket
     ticket = generate_ticket()
     group_name = update.effective_chat.title or "Grupo sin nombre"
 
-    # Guardar la solicitud
     data = load_requests()
     request = {
         "ticket": ticket,
@@ -216,12 +215,11 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "source": "EntresHijos",
         "priority": False,
-        "status": "en espera"  # Nuevo campo para rastrear el estado
+        "status": "en espera"
     }
     data["requests"].append(request)
     save_requests(data)
 
-    # Confirmación con solicitudes restantes si aplica
     response_text = (
         f"✅ **¡Solicitud Registrada!** 🎉\n"
         f"👤 @{escape_markdown(username)}\n"
@@ -240,8 +238,8 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=response_text,
         parse_mode="Markdown"
     )
+    context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
 
-    # Notificación de "Solicitud en cola" al grupo
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
@@ -258,7 +256,6 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # Notificación automática a los administradores
     await context.bot.send_message(
         chat_id=ADMIN_GROUP_ID,
         text=(
@@ -325,7 +322,6 @@ async def view_requests_command(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning(f"Ticket #{ticket} no encontrado")
         return
     else:
-        # Mostrar lista de tickets si no se especifica un ticket
         sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
         keyboard = []
         for req in sorted_requests:
@@ -358,7 +354,6 @@ async def delete_request_command(update: Update, context: ContextTypes.DEFAULT_T
         logger.info("No hay solicitudes para eliminar")
         return
 
-    # Mostrar lista de tickets para seleccionar
     keyboard = []
     sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
     for req in sorted_requests:
@@ -465,7 +460,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **Menú de Comandos - EntresHijos** 🌟\n\n"
         "👤 **Para todos:**\n"
         "🔹 `/solicito <mensaje>` - Envía una solicitud (máx. 2 por día para no admins).\n"
-        "🔹 `/infosolic <ticket>` - Consulta el estado de tu solicitud.\n\n"
+        "🔹 `/pendiente <ticket>` - Consulta el estado de tu solicitud.\n\n"
         "👑 **Solo administradores:**\n"
         "🔹 `/vp <número_de_ticket>` - Muestra detalles de una solicitud o lista todas.\n"
         "🔹 `/bp` - Elimina una solicitud seleccionando un ticket.\n"
@@ -520,14 +515,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await clean_admin_messages(context, update.effective_chat.id, msg.message_id)
     logger.info("Estadísticas mostradas")
 
-# Comando /infosolic - Para usuarios
-async def infosolic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Comando /pendiente - Para usuarios
+async def pendiente_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     if not context.args or not context.args[0].isdigit():
-        msg = await update.message.reply_text("❌ Uso: `/infosolic <ticket>`. Proporciona el número de ticket. 😊")
+        msg = await update.message.reply_text("❌ Uso: `/pendiente <ticket>`. Proporciona el número de ticket. 😊")
         context.job_queue.run_once(auto_delete_message, 120, data=(chat_id, msg.message_id))
-        logger.warning(f"Intento de /infosolic sin ticket válido por usuario {user.id}")
+        logger.warning(f"Intento de /pendiente sin ticket válido por usuario {user.id}")
         return
 
     ticket = int(context.args[0])
@@ -562,7 +557,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action = query.data
 
-    # Manejar botones que no tienen un ticket
     if action == "view_all":
         data = load_requests()
         sorted_requests = sorted(data["requests"], key=lambda x: x["date"])
@@ -611,7 +605,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_requests_command(update, context)
         logger.info(f"Selección de ticket #{ticket} para ver detalles")
 
-    # Manejar botones que tienen un ticket (delete_, priority_, send_message_)
     if action.startswith("delete_select_"):
         ticket = int(action.split("_")[2])
         data = load_requests()
@@ -698,7 +691,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 if status == "uploaded":
                     notification += "🔍 Usa la lupa en el canal correspondiente para encontrar tu solicitud."
-                elif status == "not_accepted":
+                elif status == "no aceptada":
                     notification += "❌ Tu solicitud no fue aceptada. Contacta a un administrador si necesitas ayuda."
                 msg = await context.bot.send_message(
                     chat_id=request["group_id"],
@@ -706,6 +699,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
                 context.job_queue.run_once(auto_delete_message, 120, data=(request["group_id"], msg.message_id))
+
+                # Eliminar el mensaje original "Solicitud en Cola"
+                try:
+                    updates = await context.bot.get_updates(offset=-1, limit=50)
+                    for update in updates:
+                        if (update.message and update.message.chat_id == request["group_id"] and
+                            f"Ticket #{ticket}" in update.message.text and "Solicitud en Cola" in update.message.text):
+                            await context.bot.delete_message(chat_id=request["group_id"], message_id=update.message.message_id)
+                            logger.info(f"Mensaje original eliminado (Ticket #{ticket}, Chat ID: {request['group_id']})")
+                            break
+                except TelegramError as e:
+                    logger.error(f"Error al eliminar mensaje original (Ticket #{ticket}): {str(e)}")
             else:
                 data["requests"].remove(request)
                 save_requests(data)
@@ -800,7 +805,7 @@ async def action_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Función principal
 def main():
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).job_queue(JobQueue()).build()
 
     # Añadir handlers
     application.add_handler(CommandHandler("start", start_handler))
@@ -811,7 +816,7 @@ def main():
     application.add_handler(CommandHandler("rs", refresh_requests_command))
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("infosolic", infosolic_command))
+    application.add_handler(CommandHandler("pendiente", pendiente_command))
 
     # Handlers para botones
     application.add_handler(CallbackQueryHandler(button_start_handler, pattern="^solicito_start$|^menu_start$"))
