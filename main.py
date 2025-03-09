@@ -2,6 +2,7 @@ import json
 import os
 import logging
 import time
+import sys
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
@@ -9,6 +10,7 @@ from telegram.helpers import escape_markdown
 from telegram.error import TelegramError, NetworkError
 from dotenv import load_dotenv
 import traceback
+import asyncio
 
 # === CONSTANTES ===
 logging.basicConfig(
@@ -20,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN no encontrado en .env. Deteniendo el bot...")
+    sys.exit(1)
+
 ADMIN_GROUP_ID = "-1002305997509"  # ID del grupo de administradores
 BOT_ID = 7714399570  # ID del bot a añadir como administrador
 REQUEST_LIMIT = 2  # Límite de solicitudes por usuario cada 24 horas
@@ -27,6 +33,7 @@ DB_FILE = "requests.json"
 BLACKLIST_FILE = "blacklist.json"
 AUTO_DELETE_TIME = 120  # 2 minutos en segundos
 PID_FILE = "bot.pid"  # Archivo para almacenar el PID del proceso
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")  # production (Vultr) o development (Replit)
 
 # === FUNCIONES UTILITARIAS ===
 def load_requests():
@@ -127,9 +134,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"❌ {error_details}")
 
     if "Conflict: terminated by other getUpdates request" in error_msg:
-        logger.error("❌ Conflicto detectado: otra instancia del bot está corriendo. Deteniendo esta instancia...")
-        print("❌ Error: Otra instancia del bot está corriendo. Por favor, detén todas las instancias y ejecuta solo una.")
-        os._exit(1)  # Detener el bot inmediatamente
+        logger.error("❌ Conflicto detectado: otra instancia del bot está corriendo. Intentando reconectar en 10 segundos...")
+        await asyncio.sleep(10)  # Esperar antes de reintentar
+        return  # No detener el bot, permitir que intente reconectarse
 
     if update and update.message:
         msg = await update.message.reply_text("❌ ¡Error en EntresHijos! Intenta de nuevo o contacta a un admin. 😊")
@@ -144,12 +151,22 @@ def check_single_instance():
             os.kill(int(old_pid), 0)  # Verificar si el proceso sigue vivo
             logger.error(f"❌ Otra instancia del bot ya está corriendo con PID {old_pid}. Deteniendo esta instancia...")
             print(f"❌ Error: Otra instancia del bot ya está corriendo con PID {old_pid}. Por favor, deténla antes de iniciar una nueva.")
-            os._exit(1)
+            sys.exit(1)
         except (OSError, ValueError):
             logger.info(f"🗑️ PID anterior {old_pid} no está activo. Continuando...")
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
     logger.info(f"✅ PID del bot registrado: {os.getpid()}")
+
+# === LIMPIAR SESIONES DE TELEGRAM ===
+async def clear_telegram_sessions(app: Application):
+    try:
+        logger.info("🧹 Intentando limpiar sesiones previas de Telegram...")
+        await app.bot.set_webhook(url="")  # Desactivar cualquier webhook previo
+        await app.bot.delete_webhook()  # Eliminar webhook para forzar uso de getUpdates
+        logger.info("✅ Sesiones de Telegram limpiadas.")
+    except TelegramError as e:
+        logger.warning(f"⚠️ No se pudo limpiar sesiones de Telegram: {str(e)}")
 
 # === COMANDOS PRINCIPALES ===
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -644,11 +661,17 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.delete()
 
 # === FUNCIÓN PRINCIPAL ===
-def main():
+async def main():
     # Verificar instancia única
     check_single_instance()
 
+    # Crear la aplicación
     application = Application.builder().token(TOKEN).job_queue(JobQueue()).build()
+
+    # Limpiar sesiones previas de Telegram
+    await clear_telegram_sessions(application)
+
+    # Registrar manejadores
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("solicito", solicito_command))
     application.add_handler(CommandHandler("tickets", tickets_command))
@@ -659,20 +682,48 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_handler))
     application.add_error_handler(error_handler)
-    logger.info("🚀 Bot de EntresHijos iniciado exitosamente")
+
+    logger.info(f"🚀 Bot de EntresHijos iniciado exitosamente (Entorno: {ENVIRONMENT})")
     print("🚀 Bot iniciado. Escuchando comandos...")
 
-    try:
-        application.run_polling()
-    except NetworkError as e:
-        logger.error(f"❌ Error de red: {str(e)}. Reintentando en 5 segundos...")
-        time.sleep(5)
-        application.run_polling()
-    finally:
-        # Eliminar el archivo PID al cerrar el bot
-        if os.path.exists(PID_FILE):
-            os.remove(PID_FILE)
-            logger.info("🗑️ Archivo PID eliminado al cerrar el bot")
+    # Elegir entre polling y webhook dependiendo del entorno
+    max_retries = 5
+    retry_delay = 10
+
+    if ENVIRONMENT == "development":  # Replit
+        # Usar webhooks para Replit
+        webhook_url = "https://telegram-request-bot.xavirmyx.repl.co/webhook"
+        logger.info(f"🌐 Configurando webhook para Replit: {webhook_url}")
+        await application.bot.set_webhook(url=webhook_url)
+        await application.run_webhook(
+            webhook_url=webhook_url,
+            listen="0.0.0.0",
+            port=80
+        )
+    else:  # Vultr (production)
+        # Usar polling para Vultr
+        for attempt in range(max_retries):
+            try:
+                await application.run_polling()
+                break
+            except NetworkError as e:
+                logger.error(f"❌ Error de red: {str(e)}. Reintentando en {retry_delay} segundos... (Intento {attempt + 1}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            except Exception as e:
+                if "Conflict: terminated by other getUpdates request" in str(e):
+                    logger.error(f"❌ Conflicto detectado: otra instancia del bot está corriendo. Reintentando en {retry_delay} segundos... (Intento {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ Error inesperado: {str(e)}. Deteniendo el bot...")
+                    break
+        else:
+            logger.error("❌ Máximo número de reintentos alcanzado. Deteniendo el bot...")
+            sys.exit(1)
+
+    # Eliminar el archivo PID al cerrar el bot
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+        logger.info("🗑️ Archivo PID eliminado al cerrar el bot")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
